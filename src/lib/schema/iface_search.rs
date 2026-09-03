@@ -25,6 +25,9 @@ impl IfaceSearch {
     }
 
     pub(crate) fn push(&mut self, iface: &Interface) {
+        if iface.is_userspace() {
+            return;
+        }
         let kernel_iface_name = iface.kernel_iface_name().to_string();
         if kernel_iface_name.is_empty() {
             return;

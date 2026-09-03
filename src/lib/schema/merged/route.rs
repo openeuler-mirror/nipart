@@ -443,6 +443,17 @@ fn resolve_desired_routes(
                     merged_ifaces.resolve_route_next_hop_iface(name)
                 {
                     rt.next_hop_iface = Some(kernel_iface_name);
+                } else if merged_ifaces.is_pending_wifi_cfg_route_target(name) {
+                    // A `wifi-cfg` profile is userspace-only: its route can
+                    // only be installed once the wifi-phy carrying its SSID
+                    // is connected. Keep the route in the saved state and
+                    // let the link-up event apply it then.
+                    log::debug!(
+                        "Deferring route {rt}: wifi-cfg {} has no connected \
+                         wifi-phy yet",
+                        name
+                    );
+                    continue;
                 } else {
                     return Err(NipartError::new(
                         ErrorKind::InvalidArgument,

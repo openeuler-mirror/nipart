@@ -1061,6 +1061,121 @@ fn test_route_next_hop_iface_unmatched_logical_name_adds_route() {
     assert!(result.is_err());
 }
 
+/// A route whose `next-hop-interface` names an up `wifi-cfg` profile must
+/// resolve to the kernel `wifi-phy` currently connected to that profile,
+/// not be left pointing at the userspace profile name.
+#[test]
+fn test_wifi_cfg_route_next_hop_resolves_to_connected_phy() {
+    let desired: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: HomeWiFi
+            type: wifi-cfg
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: false
+              address:
+                - ip: 192.0.2.99
+                  prefix-length: 24
+            wifi:
+              ssid: HomeWiFi
+              base-iface: wlan0
+        routes:
+          config:
+            - destination: 198.51.100.0/24
+              next-hop-interface: HomeWiFi
+              next-hop-address: 192.0.2.1
+              table-id: 254
+        "#,
+    )
+    .unwrap();
+
+    let current: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: wlan0
+            type: wifi-phy
+            state: up
+            link-state: up
+            mac-address: 02:00:00:00:00:01
+            wifi:
+              ssid: HomeWiFi
+        "#,
+    )
+    .unwrap();
+
+    let merged =
+        MergedNetworkState::new(desired, current, None, Default::default())
+            .unwrap();
+    let changed: Vec<&str> = merged
+        .routes
+        .changed_routes
+        .iter()
+        .filter_map(|rt| rt.next_hop_iface.as_deref())
+        .collect();
+    assert_eq!(changed, vec!["wlan0"]);
+}
+
+/// A route to an up `wifi-cfg` whose wifi-phy is not connected yet must not
+/// be sent to the kernel. It is persisted so the link-up event can apply it
+/// after the profile associates.
+#[test]
+fn test_wifi_cfg_route_deferred_when_phy_not_connected() {
+    let desired: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: HomeWiFi
+            type: wifi-cfg
+            state: up
+            wifi:
+              ssid: HomeWiFi
+        routes:
+          config:
+            - destination: 198.51.100.0/24
+              next-hop-interface: HomeWiFi
+              next-hop-address: 192.0.2.1
+              table-id: 254
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedNetworkState::new(
+        desired,
+        NetworkState::default(),
+        None,
+        Default::default(),
+    )
+    .unwrap();
+
+    assert!(merged.routes.changed_routes.is_empty());
+    assert!(merged.routes.route_changed_ifaces.is_empty());
+
+    let saved_routes = merged.gen_state_for_save().routes.config.unwrap();
+    assert_eq!(saved_routes.len(), 1);
+    assert_eq!(saved_routes[0].next_hop_iface.as_deref(), Some("HomeWiFi"));
+}
+
+/// The route resolver must not treat userspace-only profiles (e.g.
+/// `wifi-cfg`) as kernel interface names.
+#[test]
+fn test_resolve_route_next_hop_ignores_userspace_wifi_cfg() {
+    let desired: Interfaces = rmsd_yaml::from_str(
+        r#"---
+        - name: HomeWiFi
+          type: wifi-cfg
+          state: up
+          wifi:
+            ssid: HomeWiFi
+        "#,
+    )
+    .unwrap();
+
+    let merged =
+        MergedInterfaces::new(desired, Interfaces::default(), None).unwrap();
+    assert_eq!(merged.resolve_route_next_hop_iface("HomeWiFi"), None);
+}
+
 /// Test parsing `auto-gateway` in IPv4 DHCP config.
 #[test]
 fn test_ipv4_auto_gateway_false() {

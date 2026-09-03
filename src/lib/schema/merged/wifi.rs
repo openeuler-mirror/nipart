@@ -5,7 +5,39 @@ use std::collections::HashSet;
 use crate::{
     Interface, InterfaceIdentifier, InterfaceLinkState, InterfaceState,
     InterfaceType, Interfaces, MergedInterfaces, NipartInterface,
+    WifiCfgInterface,
 };
+
+pub(crate) fn wifi_cfg_matches_phy(
+    wifi_cfg: &WifiCfgInterface,
+    cur_iface: &Interface,
+) -> bool {
+    let Some(wifi) = wifi_cfg.wifi.as_ref() else {
+        return false;
+    };
+    if cur_iface.iface_type() != &InterfaceType::WifiPhy {
+        return false;
+    }
+    let ssid_match = matches!(
+        cur_iface,
+        Interface::WifiPhy(phy) if phy.ssid() == Some(wifi.ssid.as_str())
+    );
+    let base_match = wifi.base_iface.as_deref().is_some_and(|base_iface| {
+        base_iface == cur_iface.kernel_iface_name()
+            || base_iface == cur_iface.name()
+    });
+    (base_match || wifi.base_iface.is_none()) && ssid_match
+}
+
+pub(crate) fn find_connected_wifi_phy_for_cfg<'a>(
+    current: &'a Interfaces,
+    wifi_cfg: &WifiCfgInterface,
+) -> Option<&'a Interface> {
+    current.kernel_ifaces.values().find(|cur_iface| {
+        wifi_cfg_matches_phy(wifi_cfg, cur_iface)
+            && cur_iface.base_iface().link_state == Some(InterfaceLinkState::Up)
+    })
+}
 
 /// Expand the IP config of a `wifi-cfg` onto its already-connected
 /// `wifi-phy`.
@@ -29,35 +61,15 @@ pub(crate) fn expand_wifi_cfg_to_connected_phy(
         if !wifi_cfg.is_up() {
             continue;
         }
-        let Some(wifi) = wifi_cfg.wifi.as_ref() else {
-            continue;
-        };
         if wifi_cfg.base_iface().ipv4.is_none()
             && wifi_cfg.base_iface().ipv6.is_none()
         {
             continue;
         }
-        let Some(cur_phy) = current.kernel_ifaces.values().find(|cur_iface| {
-            if cur_iface.iface_type() != &InterfaceType::WifiPhy {
-                return false;
-            }
-            let ssid_match = matches!(
-                cur_iface,
-                Interface::WifiPhy(phy)
-                    if phy.ssid() == Some(wifi.ssid.as_str())
-            );
-            let base_match =
-                wifi.base_iface.as_deref().is_some_and(|base_iface| {
-                    base_iface == cur_iface.kernel_iface_name()
-                        || base_iface == cur_iface.name()
-                });
-            (base_match || wifi.base_iface.is_none()) && ssid_match
-        }) else {
+        let Some(cur_phy) = find_connected_wifi_phy_for_cfg(current, wifi_cfg)
+        else {
             continue;
         };
-        if cur_phy.base_iface().link_state != Some(InterfaceLinkState::Up) {
-            continue;
-        }
         let phy_name = cur_phy.kernel_iface_name().to_string();
         if desired.kernel_ifaces.contains_key(&phy_name) {
             continue;

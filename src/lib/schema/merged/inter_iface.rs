@@ -484,7 +484,59 @@ impl MergedInterfaces {
         &self,
         name: &str,
     ) -> Option<String> {
-        self.iface_search.search_name(name)
+        // Resolve kernel names/profile names first, then an up `wifi-cfg`
+        // to the connected wifi-phy carrying its SSID.
+        if let Some(kernel_iface_name) = self.iface_search.search_name(name) {
+            return Some(kernel_iface_name);
+        }
+        for merged_iface in self.user_ifaces.values() {
+            let Interface::WifiCfg(wifi_cfg) = &merged_iface.merged else {
+                continue;
+            };
+            if !wifi_cfg.is_up() {
+                continue;
+            }
+            let Some(wifi) = wifi_cfg.wifi.as_ref() else {
+                continue;
+            };
+            if wifi_cfg.name() != name && wifi.ssid.as_str() != name {
+                continue;
+            }
+            if let Some(cur_iface) =
+                super::wifi::find_connected_wifi_phy_for_cfg(
+                    &self.current,
+                    wifi_cfg,
+                )
+            {
+                return Some(cur_iface.kernel_iface_name().to_string());
+            }
+        }
+        None
+    }
+
+    /// Whether `name` refers to an up `wifi-cfg` profile whose wifi-phy is
+    /// not connected yet. Routes to such profiles are persisted and applied
+    /// later by the wifi-phy link-up event instead of failing the apply.
+    pub(crate) fn is_pending_wifi_cfg_route_target(&self, name: &str) -> bool {
+        self.user_ifaces.values().any(|merged_iface| {
+            let Interface::WifiCfg(wifi_cfg) = &merged_iface.merged else {
+                return false;
+            };
+            if !wifi_cfg.is_up() {
+                return false;
+            }
+            let name_matched = wifi_cfg.name() == name
+                || wifi_cfg
+                    .wifi
+                    .as_ref()
+                    .is_some_and(|wifi| wifi.ssid.as_str() == name);
+            name_matched
+                && super::wifi::find_connected_wifi_phy_for_cfg(
+                    &self.current,
+                    wifi_cfg,
+                )
+                .is_none()
+        })
     }
 
     pub(crate) fn verify(

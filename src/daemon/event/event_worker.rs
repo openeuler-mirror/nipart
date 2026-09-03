@@ -248,6 +248,14 @@ impl NipartEventWorker {
             {
                 log::trace!("Pending apply config: {new_iface}");
                 desired_state.ifaces.push(new_iface);
+                let config_routes =
+                    desired_state.routes.config.get_or_insert_default();
+                for route in
+                    gen_routes_for_wifi_cfg_up(saved_iface, &saved_state)
+                {
+                    log::trace!("Pending apply route {route}");
+                    config_routes.push(route);
+                }
             }
 
             // `auto-connect` defaults to `true` when not defined, hence
@@ -383,6 +391,29 @@ fn gen_routes_for_iface_up(
     ret_routes
 }
 
+/// Gather saved routes whose next-hop is the given `wifi-cfg` profile.
+/// The routes are applied when the wifi-phy carrying the profile's SSID
+/// comes up; `MergedRoutes` resolves the profile name to that kernel phy.
+fn gen_routes_for_wifi_cfg_up(
+    saved_iface: &Interface,
+    saved_state: &NetworkState,
+) -> Vec<RouteEntry> {
+    if saved_iface.iface_type() != &InterfaceType::WifiCfg {
+        return Vec::new();
+    }
+    let Some(config_rts) = saved_state.routes.config.as_ref() else {
+        return Vec::new();
+    };
+    let mut ret_routes: Vec<RouteEntry> = Vec::new();
+    for rt in config_rts
+        .iter()
+        .filter(|rt| is_route_matching_iface(rt, saved_iface))
+    {
+        ret_routes.push(rt.clone());
+    }
+    ret_routes
+}
+
 fn gen_desired_iface_up(
     saved_iface: &Interface,
     saved_state: &NetworkState,
@@ -449,6 +480,13 @@ fn wifi_cfg_to_wifi_phy(
     desired.name = iface_name.to_string();
     desired.kernel_iface_name = iface_name.to_string();
     desired.iface_type = InterfaceType::WifiPhy;
+    if desired.profile_name.is_none() {
+        desired.profile_name = saved_iface
+            .base_iface()
+            .profile_name
+            .clone()
+            .or_else(|| Some(saved_iface.name().to_string()));
+    }
 
     desired.into()
 }
@@ -537,14 +575,16 @@ mod tests {
 
     use nipart::{
         Interface, InterfaceAutoConnect, InterfaceIpv4, InterfaceLinkEvent,
-        InterfaceState, InterfaceType, NetworkState, NipartInterface,
+        InterfaceState, InterfaceType, MergedNetworkState, NetworkState,
+        NipartInterface,
     };
 
     use super::{
-        gen_desired_iface_down, gen_routes_for_iface_up, gen_wifi_plugin_state,
+        gen_desired_iface_down, gen_routes_for_iface_up,
+        gen_routes_for_wifi_cfg_up, gen_wifi_plugin_state,
         handle_event_auto_connect, handle_wifi_phy_event,
         is_route_matching_iface, is_stale_link_down_event, nic_is_gone,
-        wifi_phy_ssid,
+        wifi_cfg_to_wifi_phy, wifi_phy_ssid,
     };
 
     fn gen_wifi_cfg_iface() -> Interface {
@@ -638,6 +678,32 @@ interfaces:
         .unwrap()
     }
 
+    fn gen_wifi_cfg_state_with_route() -> NetworkState {
+        rmsd_yaml::from_str(
+            r#"---
+            version: 1
+            routes:
+              config:
+              - destination: 203.0.113.0/24
+                next-hop-interface: Test-WIFI
+                next-hop-address: 203.0.113.254
+                metric: 102
+                table-id: 254
+            interfaces:
+              - name: Test-WIFI
+                type: wifi-cfg
+                state: up
+                ipv4:
+                  enabled: true
+                  dhcp: true
+                wifi:
+                  ssid: Test-WIFI
+                  base-iface: wlan0
+            "#,
+        )
+        .unwrap()
+    }
+
     fn find_iface<'a>(state: &'a NetworkState, name: &str) -> &'a Interface {
         state.ifaces.iter().find(|i| i.name() == name).unwrap()
     }
@@ -687,6 +753,16 @@ interfaces:
                 "{name} should not pick up the vpn0 route"
             );
         }
+    }
+
+    #[test]
+    fn test_wifi_cfg_routes_included_on_wifi_phy_up() {
+        let state = gen_wifi_cfg_state_with_route();
+        let wifi_cfg = find_iface(&state, "Test-WIFI");
+        let routes = gen_routes_for_wifi_cfg_up(wifi_cfg, &state);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].destination.as_deref(), Some("203.0.113.0/24"));
+        assert_eq!(routes[0].next_hop_iface.as_deref(), Some("Test-WIFI"));
     }
 
     #[test]
@@ -957,6 +1033,45 @@ interfaces:
         assert_eq!(new_iface.kernel_iface_name(), "wlan0");
         assert_eq!(new_iface.name(), "wlan0");
         assert!(new_iface.base_iface().ipv4.is_some());
+    }
+
+    #[test]
+    fn test_wifi_cfg_event_route_resolves_to_connected_phy() {
+        let saved_state = gen_wifi_cfg_state_with_route();
+        let saved_iface = find_iface(&saved_state, "Test-WIFI");
+        let mut desired_state = NetworkState::default();
+        desired_state
+            .ifaces
+            .push(wifi_cfg_to_wifi_phy("wlan0", saved_iface));
+        desired_state.routes = saved_state.routes.clone();
+
+        let current_state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            interfaces:
+              - name: wlan0
+                type: wifi-phy
+                state: up
+                link-state: up
+                wifi:
+                  ssid: Test-WIFI
+            "#,
+        )
+        .unwrap();
+
+        let merged = MergedNetworkState::new(
+            desired_state,
+            current_state,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let changed: Vec<&str> = merged
+            .routes
+            .changed_routes
+            .iter()
+            .filter_map(|rt| rt.next_hop_iface.as_deref())
+            .collect();
+        assert_eq!(changed, vec!["wlan0"]);
     }
 
     #[test]
