@@ -164,6 +164,28 @@ fn test_yaml_round_trip_routes() {
 }
 
 #[test]
+fn test_yaml_round_trip_route_rules() {
+    let (state, reparsed) = round_trip(
+        r#"---
+        route-rules:
+          config:
+            - ip-from: 198.51.100.0/24
+              ip-to: 192.0.2.0/24
+              priority: 100
+              route-table: 500
+              fwmark: 0x30
+              fwmask: 0x10
+              iif: eth1
+            - state: absent
+              route-table: 500
+        "#,
+    );
+    assert_eq!(state, reparsed);
+    let rules = state.route_rules.config.unwrap();
+    assert_eq!(rules.len(), 2);
+}
+
+#[test]
 fn test_yaml_round_trip_top_level_properties() {
     let (state, reparsed) = round_trip(
         r#"---

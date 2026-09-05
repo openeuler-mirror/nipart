@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CUR_SCHEMA_VERSION, ErrorKind, Interfaces, JsonDisplayHideSecrets,
-    NipartError, NipartWaitOnline, Routes,
+    NipartError, NipartWaitOnline, RouteRules, Routes,
 };
 
 #[derive(
@@ -31,6 +31,13 @@ pub struct NetworkState {
     /// Routes
     #[serde(default)]
     pub routes: Routes,
+    /// Route rules
+    #[serde(
+        default,
+        rename = "route-rules",
+        skip_serializing_if = "RouteRules::is_empty"
+    )]
+    pub route_rules: RouteRules,
     /// Network interfaces
     #[serde(default, rename = "interfaces")]
     pub ifaces: Interfaces,
@@ -44,6 +51,7 @@ impl Default for NetworkState {
             wait_online: None,
             ifaces: Default::default(),
             routes: Default::default(),
+            route_rules: Default::default(),
         }
     }
 }
@@ -72,6 +80,7 @@ impl NetworkState {
             ..Default::default()
         } || (self.ifaces.is_empty()
             && self.routes.is_empty()
+            && self.route_rules.is_empty()
             && self.wait_online.is_none())
     }
 

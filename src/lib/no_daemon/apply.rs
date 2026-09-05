@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{inter_ifaces::apply_ifaces, route::apply_routes};
+use super::{
+    inter_ifaces::apply_ifaces, route::apply_routes,
+    route_rule::apply_route_rules,
+};
 use crate::{
     InterfaceType, MergedNetworkState, NetworkState, NipartApplyOption,
     NipartError, NipartInterface, NipartNoDaemon,
@@ -90,6 +93,7 @@ impl NipartNoDaemon {
     ) -> Result<(), NipartError> {
         apply_ifaces(&mut merged_state.ifaces).await?;
         apply_routes(&merged_state.routes).await?;
+        apply_route_rules(&merged_state.route_rules).await?;
         Ok(())
     }
 }

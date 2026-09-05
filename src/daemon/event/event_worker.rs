@@ -8,7 +8,7 @@ use nipart::{
     InterfaceIpv6, InterfaceLinkEvent, InterfaceLinkState, InterfaceState,
     InterfaceType, MergedNetworkState, NetworkState, NipartApplyOption,
     NipartError, NipartInterface, NipartNoDaemon, NipartQueryOption,
-    RouteEntry, RouteState,
+    RouteEntry, RouteRuleEntry, RouteState,
 };
 
 use super::super::{commander::NipartCommander, task::TaskWorker};
@@ -256,6 +256,14 @@ impl NipartEventWorker {
                     log::trace!("Pending apply route {route}");
                     config_routes.push(route);
                 }
+                let config_rules =
+                    desired_state.route_rules.config.get_or_insert_default();
+                for rule in
+                    gen_route_rules_for_iface_up(saved_iface, &saved_state)
+                {
+                    log::trace!("Pending apply route rule {rule}");
+                    config_rules.push(rule);
+                }
             }
 
             // `auto-connect` defaults to `true` when not defined, hence
@@ -266,12 +274,25 @@ impl NipartEventWorker {
                 &saved_state,
                 &cur_state,
             ) {
+                let is_up = new_iface.base_iface().state.is_up();
                 desired_state.ifaces.push(new_iface);
                 let config_routes =
                     desired_state.routes.config.get_or_insert_default();
                 for route in routes {
                     log::trace!("Pending apply route {route}");
                     config_routes.push(route);
+                }
+                if is_up {
+                    let config_rules = desired_state
+                        .route_rules
+                        .config
+                        .get_or_insert_default();
+                    for rule in
+                        gen_route_rules_for_iface_up(saved_iface, &saved_state)
+                    {
+                        log::trace!("Pending apply route rule {rule}");
+                        config_rules.push(rule);
+                    }
                 }
             }
         }
@@ -412,6 +433,29 @@ fn gen_routes_for_wifi_cfg_up(
         ret_routes.push(rt.clone());
     }
     ret_routes
+}
+
+/// Gather saved route rules whose `iif` is the given saved interface. The
+/// rules are applied when the interface comes up through the event path.
+fn gen_route_rules_for_iface_up(
+    saved_iface: &Interface,
+    saved_state: &NetworkState,
+) -> Vec<RouteRuleEntry> {
+    let Some(config_rules) = saved_state.route_rules.config.as_ref() else {
+        return Vec::new();
+    };
+    let mut ret_rules: Vec<RouteRuleEntry> = Vec::new();
+    for rule in config_rules.iter().filter(|rule| {
+        rule.iif.as_ref().is_some_and(|iif| {
+            iif.as_str() == saved_iface.kernel_iface_name()
+                || iif.as_str() == saved_iface.name()
+                || Some(iif.as_str())
+                    == saved_iface.base_iface().profile_name.as_deref()
+        })
+    }) {
+        ret_rules.push(rule.clone());
+    }
+    ret_rules
 }
 
 fn gen_desired_iface_up(

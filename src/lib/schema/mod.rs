@@ -16,6 +16,7 @@ mod merged;
 mod net_state;
 mod revert;
 mod route;
+mod route_rule;
 mod state_options;
 mod value;
 mod version;
@@ -57,10 +58,15 @@ pub use self::{
     link_event::InterfaceLinkEvent,
     link_state::InterfaceLinkState,
     merged::{
-        MergedInterface, MergedInterfaces, MergedNetworkState, MergedRoutes,
+        MergedInterface, MergedInterfaces, MergedNetworkState,
+        MergedRouteRules, MergedRoutes,
     },
     net_state::NetworkState,
     route::{RouteEntry, RouteState, RouteType, Routes},
+    route_rule::{
+        AddressFamily, RouteRuleAction, RouteRuleEntry, RouteRuleState,
+        RouteRules,
+    },
     state_options::{
         NipartApplyOption, NipartQueryOption, NipartWifiControl,
         NipartWifiScanOption,

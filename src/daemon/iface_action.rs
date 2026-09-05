@@ -3,7 +3,7 @@
 use nipart::{
     ErrorKind, Interface, InterfaceIpv4, InterfaceIpv6, InterfaceState,
     InterfaceType, NetworkState, NipartApplyOption, NipartError,
-    NipartInterface, RouteEntry, RouteState,
+    NipartInterface, RouteEntry, RouteRuleEntry, RouteRuleState, RouteState,
 };
 
 use super::commander::NipartCommander;
@@ -170,6 +170,10 @@ fn gen_state_for_up(
         if !routes.is_empty() {
             state.routes.config = Some(routes);
         }
+        let rules = gen_route_rules_for_iface_up(saved_iface, saved_state);
+        if !rules.is_empty() {
+            state.route_rules.config = Some(rules);
+        }
     }
     state
 }
@@ -200,6 +204,10 @@ fn gen_state_for_down(
     let routes = gen_routes_for_iface_down(saved_iface, saved_state);
     if !routes.is_empty() {
         state.routes.config = Some(routes);
+    }
+    let rules = gen_route_rules_for_iface_down(saved_iface, saved_state);
+    if !rules.is_empty() {
+        state.route_rules.config = Some(rules);
     }
     state
 }
@@ -295,6 +303,52 @@ fn gen_routes_for_iface_down(
     ret_routes
 }
 
+fn gen_route_rules_for_iface_up(
+    saved_iface: &Interface,
+    saved_state: &NetworkState,
+) -> Vec<RouteRuleEntry> {
+    let mut ret_rules = Vec::new();
+    if let Some(config_rules) = saved_state.route_rules.config.as_ref() {
+        for rule in config_rules
+            .iter()
+            .filter(|rule| is_route_rule_matching_iface(rule, saved_iface))
+        {
+            ret_rules.push(rule.clone());
+        }
+    }
+    ret_rules
+}
+
+fn gen_route_rules_for_iface_down(
+    saved_iface: &Interface,
+    saved_state: &NetworkState,
+) -> Vec<RouteRuleEntry> {
+    let mut ret_rules = Vec::new();
+    if let Some(config_rules) = saved_state.route_rules.config.as_ref() {
+        for rule in config_rules
+            .iter()
+            .filter(|rule| is_route_rule_matching_iface(rule, saved_iface))
+        {
+            let mut new_rule = rule.clone();
+            new_rule.state = Some(RouteRuleState::Absent);
+            ret_rules.push(new_rule);
+        }
+    }
+    ret_rules
+}
+
+fn is_route_rule_matching_iface(
+    rule: &RouteRuleEntry,
+    iface: &Interface,
+) -> bool {
+    let Some(iif) = rule.iif.as_deref() else {
+        return false;
+    };
+    iif == iface.kernel_iface_name()
+        || iif == iface.name()
+        || iface.base_iface().profile_name.as_deref() == Some(iif)
+}
+
 fn is_route_matching_iface(rt: &RouteEntry, iface: &Interface) -> bool {
     let Some(next_hop_iface) = rt.next_hop_iface.as_deref() else {
         return false;
@@ -315,6 +369,11 @@ mod tests {
               config:
                 - destination: 0.0.0.0/0
                   next-hop-interface: eth0
+            route-rules:
+              config:
+                - ip-from: 198.51.100.0/24
+                  route-table: 500
+                  iif: eth0
             interfaces:
               - name: eth0
                 type: ethernet
@@ -373,6 +432,17 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            desired
+                .route_rules
+                .config
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|rule| !rule.is_absent())
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -426,5 +496,29 @@ mod tests {
                 .unwrap()
                 .is_down()
         );
+    }
+
+    #[test]
+    fn test_down_marks_matching_route_rules_absent() {
+        let state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            interfaces:
+              - name: dummy0
+                type: dummy
+                state: up
+            route-rules:
+              config:
+                - ip-from: 198.51.100.0/24
+                  route-table: 500
+                  iif: dummy0
+            "#,
+        )
+        .unwrap();
+        let dummy = find_saved_iface(&state, "dummy0").unwrap();
+        let desired = gen_state_for_down(dummy, &state);
+        let rules = desired.route_rules.config.as_ref().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].is_absent());
+        assert_eq!(rules[0].iif.as_deref(), Some("dummy0"));
     }
 }

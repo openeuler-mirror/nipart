@@ -132,6 +132,8 @@ impl NipartCommander {
                     let mut wifi_cfg_state = NetworkState::default();
                     let mut non_wifi_cfg_state = NetworkState::default();
                     non_wifi_cfg_state.routes = nic_ready_state.routes.clone();
+                    non_wifi_cfg_state.route_rules =
+                        nic_ready_state.route_rules.clone();
                     for iface in nic_ready_state.ifaces.iter() {
                         if iface.iface_type() == &InterfaceType::WifiCfg {
                             wifi_cfg_state.ifaces.push(iface.clone());
@@ -156,6 +158,8 @@ impl NipartCommander {
                 let mut wifi_cfg_state = NetworkState::default();
                 let mut non_wifi_cfg_state = NetworkState::default();
                 non_wifi_cfg_state.routes = nic_ready_state.routes.clone();
+                non_wifi_cfg_state.route_rules =
+                    nic_ready_state.route_rules.clone();
                 for iface in nic_ready_state.ifaces.iter() {
                     if iface.iface_type() == &InterfaceType::WifiCfg {
                         wifi_cfg_state.ifaces.push(iface.clone());
@@ -594,6 +598,26 @@ fn remove_ready_state(
         });
     }
 
+    // Global route rules (no `iif`) can be applied at boot immediately.
+    // Rules with an `iif` are deferred until the referenced interface is
+    // ready, just like routes are deferred until their next-hop interface is
+    // ready.
+    ret.route_rules = state.route_rules.clone();
+    if let Some(config_rules) = ret.route_rules.config.as_mut() {
+        config_rules.retain(|rule| {
+            rule.iif
+                .as_ref()
+                .is_none_or(|iif| pending_ifaces.contains_key(iif))
+        });
+    }
+    if let Some(state_rules) = state.route_rules.config.as_mut() {
+        state_rules.retain(|rule| {
+            rule.iif
+                .as_ref()
+                .is_some_and(|iif| !pending_ifaces.contains_key(iif))
+        });
+    }
+
     for (iface_name, iface_type) in pending_ifaces.drain() {
         if let Some(iface) =
             state.ifaces.kernel_ifaces.remove(iface_name.as_str())
@@ -695,6 +719,13 @@ fn remove_manual_activation(state: &mut NetworkState) {
     if let Some(rts) = state.routes.config.as_mut() {
         rts.retain(|rt| {
             rt.next_hop_iface
+                .as_ref()
+                .is_none_or(|n| !excluded.iter().any(|e| e == n))
+        });
+    }
+    if let Some(rules) = state.route_rules.config.as_mut() {
+        rules.retain(|rule| {
+            rule.iif
                 .as_ref()
                 .is_none_or(|n| !excluded.iter().any(|e| e == n))
         });
@@ -858,6 +889,60 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_ready_state_moves_global_route_rules_and_defers_iif() {
+        let mut state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+            route-rules:
+              config:
+                - ip-from: 198.51.100.0/24
+                  route-table: 500
+                - ip-from: 203.0.113.0/24
+                  route-table: 500
+                  iif: eth0
+            "#,
+        )
+        .unwrap();
+
+        let ready = remove_ready_state(&mut state, &[]);
+
+        let ready_rules = ready.route_rules.config.unwrap();
+        assert_eq!(ready_rules.len(), 1);
+        assert!(ready_rules[0].iif.is_none());
+        let pending_rules = state.route_rules.config.unwrap();
+        assert_eq!(pending_rules.len(), 1);
+        assert_eq!(pending_rules[0].iif.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn test_remove_ready_state_moves_route_rule_when_iif_ready() {
+        let mut state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+            route-rules:
+              config:
+                - ip-from: 203.0.113.0/24
+                  route-table: 500
+                  iif: eth0
+            "#,
+        )
+        .unwrap();
+
+        let ready = remove_ready_state(&mut state, &["eth0".to_string()]);
+
+        let ready_rules = ready.route_rules.config.unwrap();
+        assert_eq!(ready_rules.len(), 1);
+        assert_eq!(ready_rules[0].iif.as_deref(), Some("eth0"));
+        assert!(state.route_rules.config.unwrap().is_empty());
+    }
+
+    #[test]
     fn test_remove_manual_activation() {
         // Interfaces with `auto-connect: false`, their dependents, and
         // routes pointing to them are removed from the boot state.
@@ -916,6 +1001,39 @@ mod tests {
         let rts = state.routes.config.unwrap();
         assert_eq!(rts.len(), 1);
         assert_eq!(rts[0].next_hop_iface.as_deref(), Some("eth1"));
+    }
+
+    #[test]
+    fn test_remove_manual_activation_removes_matching_route_rules() {
+        let mut state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+                auto-connect: false
+              - name: eth1
+                type: ethernet
+                state: up
+            route-rules:
+              config:
+                - ip-from: 203.0.113.0/24
+                  route-table: 500
+                  iif: eth0
+                - ip-from: 198.51.100.0/24
+                  route-table: 500
+                  iif: eth1
+                - ip-from: 192.0.2.0/24
+                  route-table: 500
+            "#,
+        )
+        .unwrap();
+
+        remove_manual_activation(&mut state);
+
+        let rules = state.route_rules.config.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| rule.iif.as_deref() != Some("eth0")));
     }
 
     #[test]

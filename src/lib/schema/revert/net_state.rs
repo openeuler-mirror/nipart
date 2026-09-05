@@ -11,6 +11,7 @@ impl MergedNetworkState {
         Ok(NetworkState {
             ifaces: self.ifaces.generate_revert()?,
             routes: self.routes.generate_revert()?,
+            route_rules: self.route_rules.generate_revert()?,
             ..Default::default()
         })
     }

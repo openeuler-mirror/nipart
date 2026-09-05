@@ -11,6 +11,7 @@ mod ip;
 mod loopback;
 mod net_state;
 mod route;
+mod route_rule;
 mod serializer;
 mod vrf;
 mod vxlan;
