@@ -12,6 +12,7 @@ mod linux_bridge;
 mod linux_bridge_vlan;
 mod query;
 mod route;
+mod route_rule;
 mod vlan;
 mod vrf;
 mod vxlan;

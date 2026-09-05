@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use nipart::{
     ErrorKind, Interface, InterfaceState, InterfaceType, NetworkState,
     NipartError, NipartInterface, NipartIpcConnection, NipartNoDaemon,
-    NipartQueryOption, RouteEntry, RouteState,
+    NipartQueryOption, RouteEntry, RouteRuleEntry, RouteState,
 };
 
 use super::commander::NipartCommander;
@@ -119,6 +119,7 @@ impl NipartCommander {
             &saved_state,
             &saved_only_names,
         );
+        append_saved_only_route_rules(&mut net_state, &saved_state);
 
         self.fill_dhcp_states(&mut net_state).await?;
         if !opt.include_secrets {
@@ -263,6 +264,39 @@ fn append_saved_only_routes(
     }
 }
 
+/// Append saved route rules which are not currently present in the kernel.
+/// Route rules have no `state: saved`, but a rule whose `iif` interface is
+/// not present must still be visible in the running-and-saved view so it is
+/// not silently lost from the output.
+fn append_saved_only_route_rules(
+    net_state: &mut NetworkState,
+    saved_state: &NetworkState,
+) {
+    let Some(saved_rules) = saved_state.route_rules.config.as_ref() else {
+        return;
+    };
+    let kernel_rules = net_state.route_rules.config.as_deref();
+    let mut pending_rules: Vec<RouteRuleEntry> = Vec::new();
+    for rule in saved_rules.iter().filter(|rule| !rule.is_absent()) {
+        let mut rule = rule.clone();
+        if rule.action.is_none() && rule.table_id.is_none() {
+            rule.table_id = Some(RouteRuleEntry::DEFAULT_ROUTE_TABLE_ID);
+        }
+        if kernel_rules
+            .is_some_and(|rules| rules.iter().any(|cur| rule.is_match(cur)))
+        {
+            continue;
+        }
+        pending_rules.push(rule);
+    }
+    if !pending_rules.is_empty() {
+        let mut config_rules =
+            net_state.route_rules.config.take().unwrap_or_default();
+        config_rules.extend(pending_rules);
+        net_state.route_rules.config = Some(config_rules);
+    }
+}
+
 fn saved_iface_has_kernel_match(
     saved_iface: &Interface,
     cur_state: &NetworkState,
@@ -278,5 +312,69 @@ fn saved_iface_has_kernel_match(
             .kernel_ifaces
             .values()
             .any(|cur_iface| saved_iface.is_match(cur_iface))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nipart::NetworkState;
+
+    use super::append_saved_only_route_rules;
+
+    #[test]
+    fn test_saved_route_rule_without_priority_not_duplicated() {
+        let mut net_state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            route-rules:
+              config:
+                - ip-from: 198.51.100.1/32
+                  route-table: 254
+                  priority: 30000
+            "#,
+        )
+        .unwrap();
+        let saved_state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            route-rules:
+              config:
+                - ip-from: 198.51.100.1
+            "#,
+        )
+        .unwrap();
+
+        append_saved_only_route_rules(&mut net_state, &saved_state);
+
+        let rules = net_state.route_rules.config.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].priority, Some(30000));
+    }
+
+    #[test]
+    fn test_saved_default_table_rule_not_matched_by_action_rule() {
+        let mut net_state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            route-rules:
+              config:
+                - ip-from: 198.51.100.1/32
+                  action: blackhole
+                  priority: 30000
+            "#,
+        )
+        .unwrap();
+        let saved_state: NetworkState = rmsd_yaml::from_str(
+            r#"---
+            route-rules:
+              config:
+                - ip-from: 198.51.100.1
+            "#,
+        )
+        .unwrap();
+
+        append_saved_only_route_rules(&mut net_state, &saved_state);
+
+        let rules = net_state.route_rules.config.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[1].ip_from.as_deref(), Some("198.51.100.1"));
+        assert_eq!(rules[1].table_id, Some(254));
     }
 }

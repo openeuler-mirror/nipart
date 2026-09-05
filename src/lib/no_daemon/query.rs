@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{base_iface::np_iface_to_base_iface, route::get_routes};
+use super::{
+    base_iface::np_iface_to_base_iface, route::get_routes,
+    route_rule::get_route_rules,
+};
 use crate::{
     BondInterface, DummyInterface, ErrorKind, EthernetInterface, Interface,
     InterfaceType, LinuxBridgeInterface, LoopbackInterface, NetworkState,
@@ -125,6 +128,7 @@ impl NipartNoDaemon {
         }
 
         net_state.routes = get_routes(&net_state.ifaces).await;
+        net_state.route_rules = get_route_rules(&np_state.rules);
 
         net_state
             .routes
