@@ -5,7 +5,6 @@ import pytest
 import nipart
 
 from .testlib.cmdlib import exec_cmd
-from .testlib.dhcp import DHCP_SRV_IP4
 from .testlib.dhcp import DHCP_SRV_IP4_PREFIX
 from .testlib.env import has_kernel_module
 from .testlib.env import npt_path
@@ -17,6 +16,7 @@ from .testlib.wifi import TEST_WIFI_SSID_HIDDEN
 from .testlib.wifi import WIFI_TEST_NIC
 from .testlib.wifi import create_sim_wifi_nics
 from .testlib.wifi import destroy_sim_wifi_nics
+from .testlib.wifi import ping_wifi_peer
 from .testlib.wifi import start_hostapd_hidden
 
 
@@ -37,14 +37,6 @@ def clean_up():
               - name: {WIFI_TEST_NIC}
                 type: wifi-phy
                 state: absent"""))
-
-
-def ping_peer():
-    try:
-        exec_cmd(f"ping {DHCP_SRV_IP4} -c 1 -w 5".split())
-    except Exception:
-        return False
-    return True
 
 
 def link_is_up():
@@ -77,7 +69,7 @@ class TestWifiHidden:
                       address:
                         - ip: {DHCP_SRV_IP4_PREFIX}.99
                           prefix-length: 24"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
 
     def test_wifi_hidden_iface_dhcpv4(
         self, clean_up, wifi_hidden_env  # noqa: F811
@@ -94,7 +86,7 @@ class TestWifiHidden:
                     ipv4:
                       enabled: true
                       dhcp: true"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
 
     def test_wifi_scan_hides_hidden_ssid(
         self, clean_up, wifi_hidden_env  # noqa: F811
@@ -114,7 +106,7 @@ class TestWifiHidden:
                       address:
                         - ip: {DHCP_SRV_IP4_PREFIX}.99
                           prefix-length: 24"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
 
         # Disconnect the shuli client before scanning: a standalone scan
         # can hit EBUSY while the client is connected.  The kernel BSS
@@ -193,5 +185,5 @@ class TestWifiHiddenAutoConnect:
 
         # Nipart should auto-connect via directed probe (hidden_ssids).
         assert retry_till_true_or_timeout(
-            30, ping_peer
+            30, ping_wifi_peer
         ), "hidden SSID did not auto-connect after AP came up"

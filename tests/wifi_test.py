@@ -17,6 +17,7 @@ from .testlib.statelib import load_yaml
 from .testlib.wifi import TEST_WIFI_PSK
 from .testlib.wifi import TEST_WIFI_SSID
 from .testlib.wifi import WIFI_TEST_NIC
+from .testlib.wifi import ping_wifi_peer
 from .testlib.wifi import wifi_env  # noqa: F401
 
 
@@ -28,14 +29,6 @@ def clean_up():
               - name: {WIFI_TEST_NIC}
                 type: wifi-phy
                 state: absent"""))
-
-
-def ping_peer():
-    try:
-        exec_cmd(f"ping {DHCP_SRV_IP4} -c 1 -w 5".split())
-    except Exception:
-        return False
-    return True
 
 
 @pytest.mark.skipif(
@@ -93,7 +86,7 @@ class TestWifi:
                       address:
                         - ip: {DHCP_SRV_IP4_PREFIX}.99
                           prefix-length: 24"""))
-        assert retry_till_true_or_timeout(5, ping_peer)
+        assert retry_till_true_or_timeout(5, ping_wifi_peer)
 
     def test_wifi_iface_dhcpv4(self, clean_up, wifi_env):  # noqa: F811
         nipart.apply(load_yaml(f"""---
@@ -107,7 +100,7 @@ class TestWifi:
                     ipv4:
                       enabled: true
                       dhcp: true"""))
-        assert retry_till_true_or_timeout(5, ping_peer)
+        assert retry_till_true_or_timeout(5, ping_wifi_peer)
 
     def test_wifi_off_scan_fails_and_up_restores(
         self, clean_up, wifi_env  # noqa: F811
@@ -133,7 +126,7 @@ class TestWifi:
                       next-hop-address: {DHCP_SRV_IP4}
                       table-id: 254
                 """))
-        assert retry_till_true_or_timeout(5, ping_peer)
+        assert retry_till_true_or_timeout(5, ping_wifi_peer)
         assert retry_till_true_or_timeout(
             5, self.has_static_ip_and_route
         ), "WIFI static IP or route missing before `npt wifi off`"
@@ -148,6 +141,10 @@ class TestWifi:
             assert retry_till_true_or_timeout(
                 10, self.has_no_static_ip_and_route
             ), "WIFI IP or route was not purged by `npt wifi off`"
+            # The connectivity check must not be answered by another
+            # interface of the test machine: this ping succeeds only when
+            # the traffic leaves through WIFI.
+            assert not ping_wifi_peer()
 
             rc, out, err = exec_cmd([CLI_PATH, "wifi", "scan"], check=False)
             assert rc != 0, "npt wifi scan should fail while WIFI is off"
@@ -157,8 +154,16 @@ class TestWifi:
             assert rc == 0, f"npt wifi on failed:\n{out}\n{err}"
             assert "WIFI is on" in out, out
 
-            assert retry_till_true_or_timeout(5, ping_peer)
-            assert self.connected_ssid() == TEST_WIFI_SSID
+            # `npt wifi on` only re-enables WIFI: the plugin reconnects
+            # to the saved profile asynchronously (shuli scans and then
+            # completes the handshake), and the daemon restores the
+            # saved IP stack when the link-up event is processed.
+            assert retry_till_true_or_timeout(
+                30, lambda: self.connected_ssid() == TEST_WIFI_SSID
+            ), "WIFI did not reconnect to the saved SSID after `npt wifi on`"
+            assert retry_till_true_or_timeout(
+                10, ping_wifi_peer
+            ), "Cannot ping peer through WIFI after `npt wifi on`"
             assert retry_till_true_or_timeout(
                 10, self.has_static_ip_and_route
             ), "WIFI static IP or route not restored by `npt wifi on`"

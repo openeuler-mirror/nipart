@@ -1,10 +1,5 @@
 # TODO
 
-- `wifi_test.py::test_wifi_off_scan_fails_and_up_restores` fails on
-  VM: after `npt wifi off` and `npt wifi on`, ping works but
-  `iw dev test-wlan0 link` reports no SSID, so the
-  `connected_ssid() == TEST_WIFI_SSID` assertion fails. Reproduced with
-  the monitor and DHCP fixes of 2026-09-13 reverted, hence unrelated.
 - Restart DHCPv6 service upon link local address changes
 - Support filtering full network query to a single interface
 - OVS bridge
