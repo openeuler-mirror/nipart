@@ -7,7 +7,6 @@ import nipart
 import pytest
 
 from .testlib.cmdlib import exec_cmd
-from .testlib.dhcp import DHCP_SRV_IP4
 from .testlib.dhcp import DHCP_SRV_IP4_PREFIX
 from .testlib.dhcp import DHCP_SRV_NIC
 from .testlib.dhcp import stop_dhcp_server
@@ -24,6 +23,7 @@ from .testlib.wifi import TIMEOUT_SECS_SIM_WIFI_NICS
 from .testlib.wifi import WIFI_TEST_NIC
 from .testlib.wifi import get_nic_name_by_perm_mac
 from .testlib.wifi import has_sim_wifi_nics
+from .testlib.wifi import ping_wifi_peer
 from .testlib.wifi import start_hostapd_open
 from .testlib.wifi import unload_wifi_sim_kernel_module
 
@@ -67,14 +67,6 @@ def clean_up():
                 state: absent"""))
 
 
-def ping_peer():
-    try:
-        exec_cmd(f"ping {DHCP_SRV_IP4} -c 1 -w 5".split())
-    except Exception:
-        return False
-    return True
-
-
 @pytest.mark.skipif(
     not has_kernel_module("mac80211_hwsim"),
     reason="Does not have 'mac80211_hwsim' module",
@@ -96,7 +88,7 @@ class TestWifiOpen:
                       address:
                         - ip: {DHCP_SRV_IP4_PREFIX}.99
                           prefix-length: 24"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
 
     def test_wifi_open_iface_dhcpv4(
         self, clean_up, wifi_open_env
@@ -111,4 +103,4 @@ class TestWifiOpen:
                     ipv4:
                       enabled: true
                       dhcp: true"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)

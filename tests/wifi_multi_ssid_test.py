@@ -29,6 +29,7 @@ from .testlib.wifi import TEST_WIFI_SSID_2
 from .testlib.wifi import TIMEOUT_SECS_SIM_WIFI_NICS
 from .testlib.wifi import WIFI_TEST_NIC
 from .testlib.wifi import get_nic_name_by_perm_mac
+from .testlib.wifi import ping_wifi_peer
 from .testlib.wifi import start_hostapd
 from .testlib.wifi import start_hostapd_2
 from .testlib.wifi import unload_wifi_sim_kernel_module
@@ -123,17 +124,6 @@ def wait_for_ssid(ssid, timeout=30):
     return False
 
 
-def ping_peer(peer_ip):
-    result = exec_cmd(f"ping {peer_ip} -c 1 -w 5".split(), check=False)
-    if result[0] != 0:
-        print(
-            f"ping {peer_ip} failed stdout={result[1]!r} "
-            f"stderr={result[2]!r}"
-        )
-        return False
-    return True
-
-
 def wifi_cfg_state_yaml(*ssid_password_states):
     entries = []
     for ssid, password, state in ssid_password_states:
@@ -190,7 +180,9 @@ class TestWifiMultiSsid:
         assert wait_for_ssid(TEST_WIFI_SSID) or wait_for_ssid(TEST_WIFI_SSID_2)
         ssid = connected_ssid()
         assert ssid in AP_IPS
-        assert retry_till_true_or_timeout(10, lambda: ping_peer(AP_IPS[ssid]))
+        assert retry_till_true_or_timeout(
+            10, lambda: ping_wifi_peer(AP_IPS[ssid])
+        )
 
     def test_wifi_switch_ssid_reuses_client(self, multi_ap_env):
         # First connect to the WPA2 AP only.
@@ -199,14 +191,14 @@ class TestWifiMultiSsid:
         )
         assert wait_for_ssid(TEST_WIFI_SSID)
         assert retry_till_true_or_timeout(
-            10, lambda: ping_peer(AP_IPS[TEST_WIFI_SSID])
+            10, lambda: ping_wifi_peer(AP_IPS[TEST_WIFI_SSID])
         )
         # Switch to the open AP on the same phy; the same shuli client
         # must be reused (only its network list is updated).
         nipart.apply(load_yaml(wifi_phy_state_yaml(TEST_WIFI_SSID_2)))
         assert wait_for_ssid(TEST_WIFI_SSID_2)
         assert retry_till_true_or_timeout(
-            10, lambda: ping_peer(AP_IPS[TEST_WIFI_SSID_2])
+            10, lambda: ping_wifi_peer(AP_IPS[TEST_WIFI_SSID_2])
         )
         # And back to the WPA2 AP.
         nipart.apply(
@@ -214,7 +206,7 @@ class TestWifiMultiSsid:
         )
         assert wait_for_ssid(TEST_WIFI_SSID)
         assert retry_till_true_or_timeout(
-            10, lambda: ping_peer(AP_IPS[TEST_WIFI_SSID])
+            10, lambda: ping_wifi_peer(AP_IPS[TEST_WIFI_SSID])
         )
 
     def test_npt_up_down_wifi_cfg(self, multi_ap_env):

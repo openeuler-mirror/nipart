@@ -4,8 +4,6 @@ import pytest
 
 import nipart
 
-from .testlib.cmdlib import exec_cmd
-from .testlib.dhcp import DHCP_SRV_IP4
 from .testlib.dhcp import DHCP_SRV_IP4_PREFIX
 from .testlib.env import has_kernel_module
 from .testlib.retry import retry_till_true_or_timeout
@@ -16,6 +14,7 @@ from .testlib.wifi import TEST_WIFI_SSID_WPA3
 from .testlib.wifi import WIFI_TEST_NIC
 from .testlib.wifi import create_sim_wifi_nics
 from .testlib.wifi import destroy_sim_wifi_nics
+from .testlib.wifi import ping_wifi_peer
 from .testlib.wifi import start_hostapd_wpa3
 
 
@@ -35,14 +34,6 @@ def clean_up():
               - name: {WIFI_TEST_NIC}
                 type: wifi-phy
                 state: absent"""))
-
-
-def ping_peer():
-    try:
-        exec_cmd(f"ping {DHCP_SRV_IP4} -c 1 -w 5".split())
-    except Exception:
-        return False
-    return True
 
 
 @pytest.mark.skipif(
@@ -65,7 +56,7 @@ class TestWifiWpa3:
                       address:
                         - ip: {DHCP_SRV_IP4_PREFIX}.99
                           prefix-length: 24"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
 
     def test_wifi_wpa3_iface_dhcpv4(self, clean_up, wifi_wpa3_env):
         nipart.apply(load_yaml(f"""---
@@ -79,4 +70,4 @@ class TestWifiWpa3:
                     ipv4:
                       enabled: true
                       dhcp: true"""))
-        assert retry_till_true_or_timeout(10, ping_peer)
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)

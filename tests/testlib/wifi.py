@@ -12,6 +12,7 @@ from .retry import retry_till_true_or_timeout
 from .dhcp import start_dhcp_server
 from .dhcp import stop_dhcp_server
 from .dhcp import DHCP_SRV_NIC
+from .dhcp import DHCP_SRV_IP4
 
 HWSIM0_PERM_MAC = "02:00:00:00:00:00"
 HWSIM1_PERM_MAC = "02:00:00:00:01:00"
@@ -324,3 +325,18 @@ def start_hostapd_hidden(net_ns, timeout=2):
     assert retry_till_true_or_timeout(timeout, hostapd_is_up_hidden)
 
     start_dhcp_server(net_ns)
+
+
+def ping_wifi_peer(peer_ip=DHCP_SRV_IP4, timeout=5):
+    """Whether `peer_ip` is reachable through the tested WIFI interface.
+
+    The ping is bound to `WIFI_TEST_NIC`: the simulated AP network
+    (`192.0.2.0/24`) may also exist on a wired interface of the test
+    machine, and an unbound ping would then succeed through that wired
+    NIC even while WIFI is down or has not reconnected yet.
+    """
+    rc, _, _ = exec_cmd(
+        f"ping {peer_ip} -c 1 -w {timeout} -I {WIFI_TEST_NIC}".split(),
+        check=False,
+    )
+    return rc == 0
