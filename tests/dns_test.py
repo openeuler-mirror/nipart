@@ -260,6 +260,54 @@ dns-resolver:
     assert _ttls(_dns_query("127.0.0.1", 53, UPSTREAM_DOMAIN)) < first_ttl
 
 
+def test_dns_cache_recreated_on_config_change(resolv_conf_backup):
+    """A changed cache config replaces the running server on the same port.
+
+    The daemon stops the old cache server and starts a new one for the new
+    configuration. The new server must be able to bind the port the old one
+    held, and it must not serve the old server's cached replies.
+    """
+    upstream_a = FixedDnsUpstream(UPSTREAM_DOMAIN, "203.0.113.11")
+    upstream_b = FixedDnsUpstream(UPSTREAM_DOMAIN, "203.0.113.12")
+    try:
+        desired = """---
+version: 1
+dns-resolver:
+  config:
+    server:
+      - 127.0.0.1
+  cache:
+    enabled: true
+    bind: "{bind}"
+    fallback:
+      auto-dns: false
+      nameservers:
+        - "127.0.0.1:{port}"
+"""
+        cli = NipartClient()
+        cli.apply_network_state(
+            load_yaml(
+                desired.format(bind=DNS_CACHE_BIND, port=upstream_a.port)
+            ),
+            NipartApplyOption(memory_only=True),
+        )
+        answers = _a_records(_dns_query("127.0.0.1", 53, UPSTREAM_DOMAIN))
+        assert answers == ["203.0.113.11"]
+
+        cli.apply_network_state(
+            load_yaml(
+                desired.format(bind=DNS_CACHE_BIND, port=upstream_b.port)
+            ),
+            NipartApplyOption(memory_only=True),
+        )
+        answers = _a_records(_dns_query("127.0.0.1", 53, UPSTREAM_DOMAIN))
+        assert answers == ["203.0.113.12"]
+        assert upstream_b.query_count > 0
+    finally:
+        upstream_a.close()
+        upstream_b.close()
+
+
 def test_dns_cache_bind_must_be_first_server(resolv_conf_backup):
     desired = f"""---
 version: 1
