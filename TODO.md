@@ -1,5 +1,7 @@
 # TODO
 
+- `src/lib/dns` still duplicates the `mudz` packet codec and UDP client;
+  re-export the `mudz` types instead once the error type change is wanted.
 - Restart DHCPv6 service upon link local address changes
 - Support filtering full network query to a single interface
 - OVS bridge

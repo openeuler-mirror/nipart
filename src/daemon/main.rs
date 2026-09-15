@@ -46,5 +46,7 @@ fn enable_logging() {
     let mut log_builder = env_logger::Builder::new();
     log_builder.filter(Some("nipart-daemon"), log::LevelFilter::Trace);
     log_builder.filter(Some("nipart"), log::LevelFilter::Trace);
+    // The embedded DNS cache server is the `mudz` crate.
+    log_builder.filter(Some("mudz"), log::LevelFilter::Trace);
     log_builder.init();
 }

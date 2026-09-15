@@ -2,25 +2,17 @@
 
 //! DNS cache server task.
 //!
-//! The cache implementation is ported from the `mudz` project (same author,
-//! Apache-2.0).  The daemon starts/updates/stops the server through
-//! [`NipartDnsManager`] instead of running it as a standalone daemon.
+//! The cache server itself is the `mudz` crate (same author, Apache-2.0);
+//! the daemon converts the schema config into [`mudz::MudzConfig`] and
+//! starts/updates/stops the server through [`NipartDnsManager`] instead of
+//! running the standalone `mudzd` daemon.
 
-mod cache;
 mod config;
-mod doh;
-mod group;
-mod host;
-mod listener;
 mod manager;
-mod resolver;
-mod retry;
-mod server;
 mod worker;
 
 pub(crate) use self::{
     config::NipartDnsServerConfig,
     manager::NipartDnsManager,
-    server::DnsCacheServer,
     worker::{NipartDnsCmd, NipartDnsReply, NipartDnsWorker},
 };

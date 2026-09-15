@@ -3,10 +3,11 @@
 use std::net::IpAddr;
 
 use futures_channel::{mpsc::UnboundedReceiver, oneshot::Sender};
-use nipart::NipartError;
+use mudz::MudzServer;
+use nipart::{ErrorKind, NipartError};
 use tokio::{sync::oneshot as tokio_oneshot, task::JoinHandle};
 
-use super::{DnsCacheServer, NipartDnsServerConfig};
+use super::NipartDnsServerConfig;
 use crate::TaskWorker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +116,11 @@ impl NipartDnsWorker {
         &mut self,
         config: NipartDnsServerConfig,
     ) -> Result<(), NipartError> {
-        let server = DnsCacheServer::new(config.clone()).await?;
+        // `MudzServer::new()` validates the configuration, binds the UDP
+        // and TCP sockets and resolves the DoH bootstrap hostnames.
+        let server = MudzServer::new(config.mudz_config())
+            .await
+            .map_err(mudz_error)?;
         let (shutdown, shutdown_rx) = tokio_oneshot::channel::<()>();
         let bind = config.bind;
         let handle = tokio::spawn(async move {
@@ -159,4 +164,16 @@ impl Drop for NipartDnsWorker {
             running.handle.abort();
         }
     }
+}
+
+/// Convert a `mudz` error into the daemon error type.
+fn mudz_error(error: mudz::MudzError) -> NipartError {
+    let kind = match error.kind {
+        mudz::ErrorKind::Bug => ErrorKind::Bug,
+        mudz::ErrorKind::Timeout => ErrorKind::Timeout,
+        mudz::ErrorKind::InvalidArgument
+        | mudz::ErrorKind::InvalidConfig
+        | mudz::ErrorKind::InvalidPacket => ErrorKind::InvalidArgument,
+    };
+    NipartError::new(kind, error.message)
 }
