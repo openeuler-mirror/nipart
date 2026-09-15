@@ -247,45 +247,7 @@ impl NipartCommander {
         let mut post_apply_current_state = self
             .query_network_state(conn.as_deref_mut(), Default::default())
             .await?;
-        // The wifi config is not stored into config manager yet. In order to
-        // pass the verification, we need to pretend the wifi config is stored
-        // in config manager.  An absent/down wifi-cfg must not be injected:
-        // it is a virtual interface, so verification would reject it as
-        // still present after the removal.
-        for merged_iface in merged_state.ifaces.user_ifaces.values() {
-            let Some(Interface::WifiCfg(iface)) = merged_iface.desired.as_ref()
-            else {
-                continue;
-            };
-            if iface.is_up() {
-                post_apply_current_state
-                    .ifaces
-                    .push(Interface::WifiCfg(Box::new(*iface.clone())));
-            } else {
-                // The saved profile is only replaced after verification, so
-                // drop it from the post-apply view when it is being removed.
-                post_apply_current_state.ifaces.user_ifaces.remove(&(
-                    iface.name().to_string(),
-                    InterfaceType::WifiCfg,
-                ));
-            }
-        }
-
-        // The `auto-connect` is not stored into config manager yet. In order
-        // to pass the verification, we need to pretend the `auto-connect` is
-        // stored.
-        for merged_iface in merged_state.ifaces.iter() {
-            if let Some(post_apply_iface) = post_apply_current_state
-                .ifaces
-                .kernel_ifaces
-                .get_mut(merged_iface.merged.kernel_iface_name())
-            {
-                post_apply_iface.base_iface_mut().auto_connect = merged_iface
-                    .for_apply
-                    .as_ref()
-                    .and_then(|i| i.base_iface().auto_connect.clone());
-            }
-        }
+        pretend_config_is_saved(&mut post_apply_current_state, merged_state);
 
         log_trace(
             conn,
@@ -434,6 +396,62 @@ async fn apply_dns_resolver(
     dns_manager.apply_config(resolver.cache.as_ref(), &[]).await
 }
 
+/// Make the daemon-only config visible to the verification.
+///
+/// The wifi config and the `auto-connect` property are stored into config
+/// manager by the daemon only: the kernel never reports them and the config
+/// manager is only updated after this verification passed, hence the queried
+/// post-apply state cannot carry them. In order to pass the verification,
+/// pretend the config is stored already: adjust the post-apply state to the
+/// state which is going to be saved.
+///
+/// The `for_apply` state cannot be used for the `auto-connect`: it is a diff
+/// which only holds properties requiring changes, hence an unchanged
+/// `auto-connect` is absent there and pretending it would erase the queried
+/// value (e.g. re-applying an unchanged config with `auto-connect: false`).
+fn pretend_config_is_saved(
+    post_apply_state: &mut NetworkState,
+    merged_state: &MergedNetworkState,
+) {
+    // An absent/down wifi-cfg must not be injected: it is a virtual
+    // interface, so the verification would reject it as still present after
+    // the removal.
+    for merged_iface in merged_state.ifaces.user_ifaces.values() {
+        let Some(Interface::WifiCfg(iface)) = merged_iface.desired.as_ref()
+        else {
+            continue;
+        };
+        if iface.is_up() {
+            post_apply_state
+                .ifaces
+                .push(Interface::WifiCfg(Box::new(*iface.clone())));
+        } else {
+            // The saved profile is only replaced after verification, so drop
+            // it from the post-apply view when it is being removed.
+            post_apply_state
+                .ifaces
+                .user_ifaces
+                .remove(&(iface.name().to_string(), InterfaceType::WifiCfg));
+        }
+    }
+
+    for merged_iface in merged_state.ifaces.iter() {
+        let Some(auto_connect) = merged_iface
+            .for_save
+            .as_ref()
+            .and_then(|iface| iface.base_iface().auto_connect.clone())
+        else {
+            continue;
+        };
+        if let Some(post_apply_iface) = post_apply_state
+            .ifaces
+            .get_mut(merged_iface.merged.base_iface())
+        {
+            post_apply_iface.base_iface_mut().auto_connect = Some(auto_connect);
+        }
+    }
+}
+
 /// Verify the applied DNS resolver state.
 ///
 /// The daemon cannot query a cache server through the plugin path, so it
@@ -515,3 +533,7 @@ fn verify_dns(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "unit_tests/apply.rs"]
+mod tests;
