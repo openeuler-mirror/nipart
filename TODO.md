@@ -1,5 +1,18 @@
 # TODO
 
+- No-daemon mode cannot verify `auto-connect`: the kernel never reports this
+  daemon-only property and no-daemon apply has no saved config, so
+  `npt apply --no-daemon` on a state containing `auto-connect: false` (or
+  `true`) applies the config and then fails with `verification-error:
+  Verification failure: <name>.interface.auto-connect desire 'false',
+  current 'null'`. Nipart should raise error for daemon only config been desired
+  for no-daemon mode.
+- Rollback of an interface rename fails: when the desired state renames an
+  existing NIC (e.g. `kernel-iface-name: cunet` on `eth0`) and a later
+  verification fails, the revert state still refers to the old kernel name,
+  hence the rollback errors with `invalid-argument: Interface eth0 does not
+  exist and veth section is not defined to create it` and the renamed
+  interface is left behind.
 - `src/lib/dns` still duplicates the `mudz` packet codec and UDP client;
   re-export the `mudz` types instead once the error type change is wanted.
 - Restart DHCPv6 service upon link local address changes
