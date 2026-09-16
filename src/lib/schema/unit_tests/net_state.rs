@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ErrorKind, NetworkState, NipartWaitOnlineCondition};
+use crate::{ErrorKind, Interface, NetworkState, NipartWaitOnlineCondition};
 
 #[test]
 fn test_new_from_yaml_valid_full_state() {
@@ -70,4 +70,59 @@ fn test_new_from_yaml_empty_string() {
     assert!(state.ifaces.is_empty());
     assert!(state.routes.is_empty());
     assert!(state.wait_online.is_none());
+}
+
+fn wifi_password(state: &NetworkState) -> Option<&str> {
+    state
+        .ifaces
+        .kernel_ifaces
+        .get("wlan0")
+        .and_then(|iface| match iface {
+            Interface::WifiPhy(wifi) => wifi.wifi.as_ref(),
+            _ => None,
+        })
+        .and_then(|wifi| wifi.password.as_deref())
+}
+
+#[test]
+fn test_extract_secrets_only_contains_iface_secrets() {
+    let mut state = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        description: test
+        wait-online:
+          timeout-sec: 60
+        routes:
+          config:
+            - destination: 0.0.0.0/0
+              next-hop-address: 192.0.2.1
+              next-hop-interface: eth1
+        dns-resolver:
+          config:
+            server:
+              - 127.0.0.1
+          cache:
+            enabled: true
+        interfaces:
+          - name: wlan0
+            type: wifi-phy
+            wifi:
+              ssid: Test-WIFI
+              password: '12345678'
+        "#,
+    )
+    .unwrap();
+
+    let secrets = state.extract_secrets().unwrap();
+
+    // Non-secret sections must not leak into the root-owned secrets file:
+    // merging it later would override a manual edit of `applied.yml`.
+    assert!(secrets.description.is_none());
+    assert!(secrets.wait_online.is_none());
+    assert!(secrets.routes.is_empty());
+    assert!(secrets.route_rules.is_empty());
+    assert!(secrets.dns_resolver.is_empty());
+
+    assert_eq!(wifi_password(&secrets), Some("12345678"));
+    assert_eq!(wifi_password(&state), Some(NetworkState::HIDE_SECRET_STR));
 }

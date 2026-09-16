@@ -5,10 +5,12 @@ import os
 import shutil
 import socket
 import struct
+import subprocess
 import threading
 import time
 
 import pytest
+import yaml
 
 from nipart import NipartClient
 from nipart import NipartError
@@ -20,8 +22,12 @@ from .testlib.statelib import load_yaml
 
 RESOLV_CONF_PATH = "/etc/resolv.conf"
 RESOLV_CONF_BACKUP = "/etc/resolv.conf.nipart-dns-test-backup"
+APPLIED_STATE_PATH = "/etc/nipart/applied.yml"
+APPLIED_SECRETS_PATH = "/etc/nipart/applied.secrets.yml"
 
 DNS_CACHE_BIND = "127.0.0.1:53"
+DNS_CACHE_HOST, DNS_CACHE_PORT = DNS_CACHE_BIND.rsplit(":", 1)
+DNS_CACHE_PORT = int(DNS_CACHE_PORT)
 TEST_SEARCH = "example.org"
 TEST_SERVER = "192.0.2.250"
 UPSTREAM_SERVER = "198.51.100.53"
@@ -152,6 +158,22 @@ def _dns_query(server, port, domain, timeout=5):
         return data
     finally:
         sock.close()
+
+
+def _dns_cache_port_in_use():
+    """Check without binding the port: probing must not race the daemon."""
+    addr = f"{DNS_CACHE_HOST}:{DNS_CACHE_PORT}"
+    for kind in ("u", "t"):
+        output = subprocess.run(
+            ["ss", f"-ln{kind}p"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        for line in output.splitlines():
+            if addr in line.split():
+                return True
+    return False
 
 
 @pytest.fixture(scope="module")
@@ -416,8 +438,6 @@ def test_dns_cache_restored_after_daemon_restart(upstream, resolv_conf_backup):
     try:
         probe.bind(("127.0.0.1", 53))
     except OSError as e:
-        import subprocess
-
         holder = subprocess.run(
             ["ss", "-lnup"],
             capture_output=True,
@@ -470,3 +490,60 @@ dns-resolver:
     assert "127.0.0.1" in dns_resolver.get("running", {}).get("server", [])
     # The static configuration is also reported by the daemon.
     assert dns_resolver.get("config", {}).get("server") == ["127.0.0.1"]
+
+
+def test_dns_cache_disabled_by_manual_applied_state_edit(resolv_conf_backup):
+    """A manual `enabled: false` edit in applied.yml must survive a restart.
+
+    `applied.secrets.yml` must only carry interface secrets. If it also
+    carried a copy of `dns-resolver`, the daemon would merge it over
+    `applied.yml` on startup and silently re-enable the cache.
+    """
+    desired = f"""---
+    version: 1
+    dns-resolver:
+      config:
+        server:
+          - {DNS_CACHE_HOST}
+      cache:
+        enabled: true
+        bind: "{DNS_CACHE_BIND}"
+        fallback:
+          auto-dns: false
+    """
+    NipartClient().apply_network_state(load_yaml(desired))
+    assert _dns_cache_port_in_use()
+
+    with open(APPLIED_SECRETS_PATH, encoding="utf-8") as fd:
+        secrets = yaml.safe_load(fd) or {}
+    assert "dns-resolver" not in secrets
+
+    with open(APPLIED_STATE_PATH, encoding="utf-8") as fd:
+        applied_backup = fd.read()
+    with open(APPLIED_SECRETS_PATH, encoding="utf-8") as fd:
+        secrets_backup = fd.read()
+
+    try:
+        stop_daemon()
+
+        applied = yaml.safe_load(applied_backup)
+        applied["dns-resolver"]["cache"]["enabled"] = False
+        with open(APPLIED_STATE_PATH, "w", encoding="utf-8") as fd:
+            yaml.safe_dump(applied, fd)
+
+        start_daemon()
+
+        # The boot restore runs asynchronously after the daemon answers
+        # ping: give it a chance to (wrongly) start the cache.
+        cache_restarted = retry_till_true_or_timeout(5, _dns_cache_port_in_use)
+        assert not cache_restarted, (
+            "dns-resolver in applied.secrets.yml overrode cache.enabled: "
+            "false in applied.yml"
+        )
+    finally:
+        stop_daemon()
+        with open(APPLIED_STATE_PATH, "w", encoding="utf-8") as fd:
+            fd.write(applied_backup)
+        with open(APPLIED_SECRETS_PATH, "w", encoding="utf-8") as fd:
+            fd.write(secrets_backup)
+        start_daemon()
