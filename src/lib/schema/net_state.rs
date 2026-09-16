@@ -71,7 +71,7 @@ impl NetworkState {
     pub const UNKNOWN_SECRET_STR: &str = "<_unknown_>";
 
     /// Return a network state with secrets only leaving self without any
-    /// secrets.
+    /// secrets(replaced by [Self::HIDE_SECRET_STR].
     pub fn hide_secrets(&mut self) {
         self.ifaces.hide_secrets();
     }
@@ -81,10 +81,20 @@ impl NetworkState {
         self.dns_resolver.validate()
     }
 
+    /// Return a network state with secrets only leaving self without any
+    /// secrets.
     pub fn extract_secrets(&mut self) -> Result<Self, NipartError> {
-        let old = self.clone();
+        let original = self.clone();
+        // Secrets only exist in interfaces for now, so the returned state only
+        // carries interface secrets (plus the schema version). Copying
+        // the unchanged non-interface sections into the root-owned
+        // secrets file would let a stale copy override a later manual
+        // edit of `applied.yml`, e.g. disabling the DNS cache.
         self.ifaces.hide_secrets();
-        old.gen_diff(self)
+        Ok(Self {
+            ifaces: original.ifaces.gen_diff(&self.ifaces)?,
+            ..Default::default()
+        })
     }
 
     pub fn is_empty(&self) -> bool {
