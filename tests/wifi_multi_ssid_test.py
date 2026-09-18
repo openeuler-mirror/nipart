@@ -169,6 +169,25 @@ def wifi_phy_state_yaml(ssid, password=None):
     reason="Does not have 'mac80211_hwsim' module",
 )
 class TestWifiMultiSsid:
+    @pytest.fixture(autouse=True)
+    def clean_up_profiles(self):
+        yield
+        # Purge the saved profiles this module created.  A saved wifi
+        # profile is auto-applied by the event worker when a wifi-phy
+        # appears, so a leftover profile would fight with the profile
+        # applied by a later wifi test module.
+        nipart.apply(load_yaml(f"""---
+            interfaces:
+              - name: {WIFI_TEST_NIC}
+                type: wifi-phy
+                state: absent
+              - name: {TEST_WIFI_SSID}
+                type: wifi-cfg
+                state: absent
+              - name: {TEST_WIFI_SSID_2}
+                type: wifi-cfg
+                state: absent"""))
+
     def test_wifi_picks_best_of_two_ssids(self, multi_ap_env):
         both = load_yaml(
             wifi_cfg_state_yaml(

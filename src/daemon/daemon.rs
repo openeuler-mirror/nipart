@@ -13,7 +13,10 @@ use tokio::{
     sync::SetOnce,
 };
 
-use super::{api::process_api_connection, commander::NipartCommander};
+use super::{
+    api::process_api_connection, commander::NipartCommander,
+    lock::NipartLockManager,
+};
 
 pub(crate) static DAEMON_IS_ONLINE: SetOnce<()> = SetOnce::const_new();
 const DAEMON_PID_FILE: &str = "/var/run/nipart/nipart.pid";
@@ -87,14 +90,28 @@ impl NipartDaemon {
         let (sender, receiver) = unbounded::<NipartManagerCmd>();
 
         let commander = NipartCommander::new(sender).await?;
+        // The boot pass pauses the interface monitor and applies the saved
+        // state, so it must not interleave with a client transaction
+        // (`apply`, `up`, `down` or `wifi`). Acquire the transaction lock
+        // before spawning the task: `NipartDaemon::new()` returns, and API
+        // connections get accepted, only after the lock is held, so a
+        // client applying right after `npt ping` succeeds waits for the
+        // boot pass instead of racing it (the race made the client's link
+        // events fall into the boot pass' monitor pause window).
+        let boot_lock =
+            NipartLockManager::lock(std::process::id() as i32).await;
         // Start a thread to load saved state instead of hanging
         let mut new_commander = commander.clone();
         tokio::spawn(async move {
-            if let Err(e) = new_commander.load_saved_state().await {
-                log::error!(
-                    "Failed to load saved state: {e}, starting with empty \
-                     state"
-                );
+            let _boot_lock = boot_lock;
+            match new_commander.load_saved_state().await {
+                Ok(()) => log::info!("Saved state load finished"),
+                Err(e) => {
+                    log::error!(
+                        "Failed to load saved state: {e}, starting with empty \
+                         state"
+                    );
+                }
             }
         });
 
