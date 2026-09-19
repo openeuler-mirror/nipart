@@ -3,7 +3,10 @@
 import os
 import time
 
+import yaml
+
 from .conftest import CLI_PATH, DAEMON_LOG, start_daemon, stop_daemon
+from .testlib.apply import nipart_apply
 from .testlib.cmdlib import exec_cmd
 from .testlib.retry import retry_till_true_or_timeout
 from .testlib.statelib import show_only
@@ -17,6 +20,8 @@ TEST_IP = "192.0.2.99"
 TEST_MTU = 1280
 ROUTE_NEXTHOP = "192.0.2.1"
 DEFAULT_TIMEOUT = 30
+TEST_DESCRIPTION = "top-level saved description"
+TEST_WAIT_ONLINE_TIMEOUT = 42
 
 # A saved config whose NIC does not exist on this host: it must not block
 # the boot apply and must be activated by the monitor worker when a NIC
@@ -204,6 +209,50 @@ interfaces:
             "Default running query must stay kernel truth for the "
             "saved-only name-based profile"
         )
+    finally:
+        if os.path.exists(SAVED_STATE_FILE):
+            os.remove(SAVED_STATE_FILE)
+        stop_daemon()
+        start_daemon()
+
+
+def test_description_and_wait_online_survive_partial_apply():
+    stop_daemon()
+    try:
+        os.makedirs(os.path.dirname(SAVED_STATE_FILE), exist_ok=True)
+        with open(SAVED_STATE_FILE, "w") as state_f:
+            state_f.write(f"""---
+version: 1
+description: {TEST_DESCRIPTION}
+wait-online:
+  timeout-sec: {TEST_WAIT_ONLINE_TIMEOUT}
+  conditions:
+  - gateway4
+interfaces:
+- name: {TEST_SAVED_ONLY_NIC}
+  type: dummy
+  state: up
+  auto-connect: false
+""")
+        start_daemon()
+
+        # A persisted apply that omits both top-level properties must keep
+        # the previously saved values.
+        nipart_apply(f"""---
+version: 1
+interfaces:
+- name: {TEST_SAVED_ONLY_NIC}
+  type: dummy
+  state: saved
+""")
+
+        with open(SAVED_STATE_FILE, encoding="utf-8") as state_f:
+            applied = yaml.safe_load(state_f)
+        assert applied.get("description") == TEST_DESCRIPTION
+        wait_online = applied.get("wait-online")
+        assert wait_online is not None
+        assert wait_online.get("timeout-sec") == TEST_WAIT_ONLINE_TIMEOUT
+        assert wait_online.get("conditions") == ["gateway4"]
     finally:
         if os.path.exists(SAVED_STATE_FILE):
             os.remove(SAVED_STATE_FILE)
