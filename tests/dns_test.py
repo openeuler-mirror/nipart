@@ -19,6 +19,7 @@ from nipart import NipartApplyOption
 from .conftest import start_daemon, stop_daemon
 from .testlib.retry import retry_till_true_or_timeout
 from .testlib.statelib import load_yaml
+from .testlib.veth import veth_interface
 
 RESOLV_CONF_PATH = "/etc/resolv.conf"
 RESOLV_CONF_BACKUP = "/etc/resolv.conf.nipart-dns-test-backup"
@@ -468,6 +469,18 @@ dns-resolver:
         - "127.0.0.1:{upstream.port}"
 """
     NipartClient().apply_network_state(load_yaml(desired))
+
+    # A persisted apply whose desired state omits `dns-resolver` must keep
+    # the saved cache.  Otherwise the restart below comes back with the
+    # cache disabled and does not listen on 127.0.0.1:53.
+    with veth_interface("dnscachetest0", "dnscachetest1"):
+        pass
+
+    with open(APPLIED_STATE_PATH, encoding="utf-8") as fd:
+        applied = yaml.safe_load(fd)
+    cache = applied.get("dns-resolver", {}).get("cache")
+    assert cache is not None, "persisted apply dropped the DNS cache"
+    assert cache.get("enabled") is True
 
     stop_daemon()
     start_daemon()
