@@ -62,6 +62,17 @@ async fn restart_client_resets_connected_state() {
 }
 
 #[test]
+fn notify_resume_without_client_is_noop() {
+    let enabled_flag = Arc::new(AtomicBool::new(true));
+    let wifi_live = Arc::new(Mutex::new(HashMap::new()));
+    let state = WifiClientState::new(enabled_flag, wifi_live);
+
+    state.notify_resume();
+
+    assert!(!state.has_client());
+}
+
+#[test]
 fn live_state_tracks_connected_ifaces_per_interface() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));

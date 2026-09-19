@@ -21,7 +21,7 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 nipart = { version = "0.1.0", path = "src/lib" }
-mudz = "0.1"
+mudz = { git = "https://github.com/cathay4t/mudz.git" }
 serde = { version = "1.0.144", features = ["derive"] }
 env_logger = "0.11.0"
 log = "0.4.17"

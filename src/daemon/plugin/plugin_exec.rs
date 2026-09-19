@@ -82,4 +82,9 @@ impl NipartDaemonPlugin {
         let mut cli = NipartPluginClient::new(&self.socket_path).await?;
         cli.wifi_control(control).await
     }
+
+    pub(crate) async fn system_resume(&self) -> Result<(), NipartError> {
+        let mut cli = NipartPluginClient::new(&self.socket_path).await?;
+        cli.system_resume().await
+    }
 }

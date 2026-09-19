@@ -106,4 +106,20 @@ impl NipartPluginManager {
             ))
         }
     }
+
+    /// Notify every plugin that the host resumed from system suspend.
+    pub(crate) async fn system_resume(&mut self) -> Result<(), NipartError> {
+        let reply = self.mgr.exec(NipartPluginCmd::SystemResume).await?;
+        if let NipartPluginReply::None = reply {
+            Ok(())
+        } else {
+            Err(NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "NipartPluginCmd::SystemResume is not replying with \
+                     NipartPluginReply::None, but {reply:?}"
+                ),
+            ))
+        }
+    }
 }

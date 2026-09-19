@@ -29,6 +29,7 @@ pub(crate) enum NipartPluginCmd {
     ApplyNetworkState(Box<(NetworkState, NipartApplyOption)>),
     WifiScan(Box<NipartWifiScanOption>),
     WifiControl(NipartWifiControl),
+    SystemResume,
 }
 
 impl std::fmt::Display for NipartPluginCmd {
@@ -45,6 +46,9 @@ impl std::fmt::Display for NipartPluginCmd {
             }
             Self::WifiControl(_) => {
                 write!(f, "wifi-control")
+            }
+            Self::SystemResume => {
+                write!(f, "system-resume")
             }
         }
     }
@@ -229,6 +233,30 @@ impl TaskWorker for NipartPluginWorker {
                     }
                 }
                 Ok(NipartPluginReply::None)
+            }
+            NipartPluginCmd::SystemResume => {
+                // Plugins without resume support reply with a NoSupport
+                // error: that is expected, only a real failure is
+                // reported back to the daemon.
+                let mut first_error = None;
+                for plugin in self.plugins.values() {
+                    match plugin.system_resume().await {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == ErrorKind::NoSupport => {
+                            log::debug!("{e}");
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            if first_error.is_none() {
+                                first_error = Some(e);
+                            }
+                        }
+                    }
+                }
+                match first_error {
+                    Some(e) => Err(e),
+                    None => Ok(NipartPluginReply::None),
+                }
             }
         }
     }
