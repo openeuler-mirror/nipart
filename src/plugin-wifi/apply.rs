@@ -88,6 +88,18 @@ impl WifiClientState {
         self.client.is_some()
     }
 
+    /// Notify the live shuli client that the host resumed from suspend.
+    ///
+    /// The notification only bumps an internal generation counter; the
+    /// client re-checks the kernel association on its next drive cycle,
+    /// so a connection lost over suspend is retried without waiting out
+    /// the retry backoff.
+    pub(crate) fn notify_resume(&self) {
+        if let Some(client) = self.client.as_ref() {
+            client.notify_resume();
+        }
+    }
+
     /// Enable or disable all WIFI actions.
     ///
     /// Disabling disconnects the shuli client and prevents future scans,

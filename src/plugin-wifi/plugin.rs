@@ -45,6 +45,7 @@ enum WifiWorkerRequest {
         NipartWifiControl,
         tokio::sync::oneshot::Sender<Result<(), NipartError>>,
     ),
+    Resume,
 }
 
 /// Dedicated worker processing wifi apply requests serially in arrival
@@ -91,6 +92,9 @@ async fn apply_worker(
                             );
                         }
                         let _ = reply.send(result);
+                    }
+                    Some(WifiWorkerRequest::Resume) => {
+                        wifi_state.notify_resume();
                     }
                     None => {
                         wifi_state.shutdown().await;
@@ -242,5 +246,29 @@ impl NipartPlugin for NipartPluginWifi {
                 format!("Failed to receive wifi control reply: {e}"),
             )
         })?
+    }
+
+    async fn system_resume(
+        plugin: &Arc<Self>,
+        conn: &mut NipartIpcConnection,
+    ) -> Result<(), NipartError> {
+        conn.log_debug("WIFI plugin system_resume".to_string())
+            .await;
+        if !plugin.wifi_enabled.load(Ordering::Acquire) {
+            log::debug!("Ignoring system resume because WIFI is off");
+            return Ok(());
+        }
+        // Never block: the apply worker owns the live shuli client and
+        // forwards the notification to it, which re-checks the kernel
+        // association and cancels any pending retry backoff.
+        plugin
+            .worker_tx
+            .send(WifiWorkerRequest::Resume)
+            .map_err(|e| {
+                NipartError::new(
+                    ErrorKind::Bug,
+                    format!("Failed to enqueue wifi resume request: {e}"),
+                )
+            })
     }
 }

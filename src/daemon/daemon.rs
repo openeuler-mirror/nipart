@@ -15,7 +15,7 @@ use tokio::{
 
 use super::{
     api::process_api_connection, commander::NipartCommander,
-    lock::NipartLockManager,
+    lock::NipartLockManager, resume::NipartResumeMonitor,
 };
 
 pub(crate) static DAEMON_IS_ONLINE: SetOnce<()> = SetOnce::const_new();
@@ -44,6 +44,7 @@ pub(crate) struct NipartDaemon {
     sigint: Signal,
     dns_auto_timer: tokio::time::Interval,
     last_auto_dns_servers: Vec<std::net::IpAddr>,
+    resume_monitor: NipartResumeMonitor,
 }
 
 impl Drop for NipartDaemon {
@@ -143,6 +144,7 @@ impl NipartDaemon {
             sigint,
             dns_auto_timer: tokio::time::interval(DNS_AUTO_REFRESH_INTERVAL),
             last_auto_dns_servers: Vec::new(),
+            resume_monitor: NipartResumeMonitor::new(),
         })
     }
 
@@ -169,6 +171,13 @@ impl NipartDaemon {
                 _ = self.dns_auto_timer.tick() => {
                     self.refresh_dns_cache_auto_dns().await;
                 }
+                suspended = self.resume_monitor.wait_for_resume() => {
+                    log::info!(
+                        "System resumed after {} seconds of suspend",
+                        suspended.as_secs()
+                    );
+                    self.handle_system_resume().await;
+                }
                 else => break,
             }
         }
@@ -193,6 +202,18 @@ impl NipartDaemon {
         self.last_auto_dns_servers = servers;
         if let Err(e) = self.commander.refresh_dns_cache_auto_dns().await {
             log::debug!("Failed to refresh DNS cache upstreams: {e}");
+        }
+    }
+
+    /// Notify the plugins that the host resumed from suspend.
+    ///
+    /// The wifi plugin forwards this to shuli, which re-checks whether
+    /// the kernel association survived and cancels any retry backoff.
+    /// A failure is logged: a plugin that cannot handle the resume
+    /// notification must not take the daemon down.
+    async fn handle_system_resume(&mut self) {
+        if let Err(e) = self.commander.notify_system_resume().await {
+            log::warn!("Failed to notify plugins about system resume: {e}");
         }
     }
 

@@ -99,6 +99,11 @@ pub trait NipartPlugin: Send + Sync + Sized + 'static {
                                 .await;
                         conn.send(result).await?
                     }
+                    NipartPluginCmd::SystemResume => {
+                        let result =
+                            Self::system_resume(&plugin, &mut conn).await;
+                        conn.send(result).await?
+                    }
                 }
             }
         }
@@ -193,6 +198,28 @@ pub trait NipartPlugin: Send + Sync + Sized + 'static {
                 ErrorKind::NoSupport,
                 format!(
                     "Plugin {} has not implemented wifi_control()",
+                    Self::PLUGIN_NAME
+                ),
+            ))
+        }
+    }
+
+    /// Notify the plugin that the host resumed from system suspend.
+    ///
+    /// A plugin must re-check the state it manages in the kernel: a
+    /// connection that did not survive the suspend has to be
+    /// re-established, and a retry backoff armed before the suspend must
+    /// not delay the first attempt after wake. The default
+    /// implementation returns an unsupported error.
+    fn system_resume(
+        _plugin: &Arc<Self>,
+        _conn: &mut NipartIpcConnection,
+    ) -> impl Future<Output = Result<(), NipartError>> + Send {
+        async {
+            Err(NipartError::new(
+                ErrorKind::NoSupport,
+                format!(
+                    "Plugin {} has not implemented system_resume()",
                     Self::PLUGIN_NAME
                 ),
             ))

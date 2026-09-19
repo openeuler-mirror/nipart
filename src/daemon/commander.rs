@@ -391,6 +391,18 @@ impl NipartCommander {
         Ok(())
     }
 
+    /// Notify every plugin that the host resumed from suspend.
+    ///
+    /// The wifi plugin forwards this to shuli so a connection that was
+    /// lost during suspend is re-established without waiting out the
+    /// retry backoff.  Plugins without resume support are ignored by the
+    /// plugin manager.
+    pub(crate) async fn notify_system_resume(
+        &mut self,
+    ) -> Result<(), NipartError> {
+        self.plugin_manager.system_resume().await
+    }
+
     /// Purge IP and routes of every active wifi-phy interface.
     ///
     /// Disabling WIFI only tells the plugin to disconnect; the kernel

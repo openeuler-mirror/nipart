@@ -15,6 +15,7 @@ mod logger;
 mod monitor;
 mod plugin;
 mod query;
+mod resume;
 mod task;
 mod udev;
 mod wait_online;

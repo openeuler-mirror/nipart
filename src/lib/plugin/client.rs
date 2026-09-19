@@ -29,6 +29,10 @@ pub enum NipartPluginCmd {
     ApplyNetworkState(Box<(NetworkState, NipartApplyOption)>),
     WifiScan(Box<NipartWifiScanOption>),
     WifiControl(NipartWifiControl),
+    /// The host resumed from system suspend. Plugins should re-check the
+    /// state they manage in the kernel and cancel any retry backoff that
+    /// was armed before the suspend.
+    SystemResume,
     Quit,
 }
 
@@ -40,6 +44,7 @@ impl NipartCanIpc for NipartPluginCmd {
             Self::ApplyNetworkState(_) => "apply-network-state".to_string(),
             Self::WifiScan(_) => "wifi-scan".to_string(),
             Self::WifiControl(_) => "wifi-control".to_string(),
+            Self::SystemResume => "system-resume".to_string(),
             Self::Quit => "quit".to_string(),
         }
     }
@@ -122,6 +127,11 @@ impl NipartPluginClient {
         self.ipc
             .send(Ok(NipartPluginCmd::WifiControl(control)))
             .await?;
+        self.ipc.recv::<()>().await
+    }
+
+    pub async fn system_resume(&mut self) -> Result<(), NipartError> {
+        self.ipc.send(Ok(NipartPluginCmd::SystemResume)).await?;
         self.ipc.recv::<()>().await
     }
 
