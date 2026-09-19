@@ -21,6 +21,16 @@ DAEMON_LOG = "/tmp/nipart_test_daemon.log"
 CLI_PATH = f"{project_dir}/target/debug/npt"
 DAEMON_PID_FILE = "/var/run/nipart/nipart.pid"
 DAEMON_BIN_PATH = f"{project_dir}/target/debug/nipart"
+# The daemon answers IPC requests while `load_saved_state()` still runs in
+# a background task.  That boot pass pauses the interface monitor, so a
+# test starting right after `start_daemon()` could miss live link events
+# and race with the boot apply.  Wait for the boot pass to finish before
+# handing the daemon over to tests.
+DAEMON_BOOT_DONE_MARKS = (
+    "Saved state load finished",
+    "Failed to load saved state:",
+)
+DAEMON_BOOT_TIMEOUT = 60
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -52,6 +62,7 @@ def run_daemon():
     )
     time.sleep(1)
     retry_till_true_or_timeout(30, check_daemon_connection)
+    _wait_daemon_boot_done(0)
     yield
     # Stop the actual current daemon (which `restart_daemon` may have
     # restarted), otherwise the last restarted daemon would survive the
@@ -82,9 +93,34 @@ def _wait_daemon_stopped():
 def _wait_daemon_ready():
     for _ in range(40):
         if daemon_ping():
-            return
+            break
         time.sleep(1)
-    raise RuntimeError("Daemon did not become ready in time")
+    else:
+        raise RuntimeError("Daemon did not become ready in time")
+
+
+def _daemon_log_size():
+    try:
+        return os.path.getsize(DAEMON_LOG)
+    except FileNotFoundError:
+        return 0
+
+
+def _boot_done_since(pos):
+    try:
+        with open(DAEMON_LOG) as log_f:
+            log_f.seek(pos)
+            log = log_f.read()
+    except FileNotFoundError:
+        return False
+    return any(mark in log for mark in DAEMON_BOOT_DONE_MARKS)
+
+
+def _wait_daemon_boot_done(log_pos):
+    if not retry_till_true_or_timeout(
+        DAEMON_BOOT_TIMEOUT, _boot_done_since, log_pos
+    ):
+        raise RuntimeError("Daemon did not finish loading saved state")
 
 
 def start_daemon():
@@ -92,6 +128,7 @@ def start_daemon():
     # inherits pytest's capture streams dies of SIGPIPE when pytest
     # closes them at the end of the session (the socket would then
     # disappear and later tests could no longer connect).
+    log_pos = _daemon_log_size()
     subprocess.Popen(
         [DAEMON_BIN_PATH],
         stdout=open(DAEMON_LOG, "a"),
@@ -99,6 +136,7 @@ def start_daemon():
         start_new_session=True,
     )
     _wait_daemon_ready()
+    _wait_daemon_boot_done(log_pos)
 
 
 def stop_daemon():

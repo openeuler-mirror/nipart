@@ -31,12 +31,40 @@ def _gen_veth_state(alt_names, iface_name=TEST_VETH, peer=TEST_VETH_PEER):
 
 
 def _create_veth_pair():
+    # An interrupted earlier run may have left the veth pair behind.
+    exec_cmd(f"ip link del {TEST_VETH}".split(), check=False)
     exec_cmd(
         f"ip link add {TEST_VETH} type veth peer name {TEST_VETH_PEER}".split()
     )
 
 
+def _purge_saved_veth_profile():
+    # Remove the saved profile as well as the kernel interface: a later
+    # daemon restart re-applies the saved state, which would re-create the
+    # veth pair and leave test leftovers behind.
+    nipart.apply(load_yaml(f"""---
+        interfaces:
+          - name: {TEST_VETH}
+            type: veth
+            state: absent
+    """))
+
+
+def _purge_saved_mac_profile(profile_name, mac_address):
+    # Purge the MAC-identified saved profile: otherwise a daemon restart
+    # re-applies the rename to a NIC carrying this MAC.
+    nipart.apply(load_yaml(f"""---
+        interfaces:
+          - name: {profile_name}
+            type: ethernet
+            identifier: mac-address
+            mac-address: {mac_address}
+            state: absent
+    """))
+
+
 def _remove_veth_pair():
+    _purge_saved_veth_profile()
     exec_cmd(f"ip link del {TEST_VETH}".split(), check=False)
 
 
@@ -211,6 +239,10 @@ REN_VETH_PEER = "veth-ren1"
 
 
 def _create_ren_veth_pair():
+    # An interrupted earlier run may have left the veth pair behind.
+    exec_cmd(f"ip link del {REN_VETH}".split(), check=False)
+    exec_cmd("ip link del renamed0".split(), check=False)
+    exec_cmd("ip link del renamed1".split(), check=False)
     exec_cmd(
         f"ip link add {REN_VETH} type veth peer name {REN_VETH_PEER}".split()
     )
@@ -245,6 +277,7 @@ def test_mac_id_kernel_iface_name_rename_keeps_original_alt_name():
         assert iface is not None
         assert iface.get("profile-name") == "port1"
     finally:
+        _purge_saved_mac_profile("port1", "02:00:00:00:00:03")
         exec_cmd(["ip", "link", "del", "renamed0"], check=False)
         _remove_ren_veth_pair()
 
@@ -274,6 +307,7 @@ def test_mac_id_kernel_iface_name_no_auto_alt_name_when_defined():
         # The original kernel name must NOT be auto-added.
         assert REN_VETH not in _kernel_alt_names("renamed1")
     finally:
+        _purge_saved_mac_profile("port2", "02:00:00:00:00:04")
         exec_cmd(["ip", "link", "del", "renamed1"], check=False)
         _remove_ren_veth_pair()
 
@@ -320,6 +354,7 @@ def test_boot_load_saved_rename_keeps_original_alt_name():
             [REN_VETH],
         ), "Saved rename + original alt-name not re-applied at boot"
     finally:
+        _purge_saved_mac_profile("port3", "02:00:00:00:00:05")
         exec_cmd(["ip", "link", "del", "renamed0"], check=False)
         exec_cmd(["ip", "link", "del", REN_VETH], check=False)
         _remove_ren_veth_pair()
