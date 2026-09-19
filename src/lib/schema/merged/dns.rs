@@ -33,6 +33,14 @@ pub struct MergedDnsResolver {
     /// learned from DHCP.
     #[serde(default)]
     pub previous_static_servers: Vec<String>,
+    /// Cache configuration to persist after a successful apply.
+    ///
+    /// An undefined cache in the desired state preserves the previously
+    /// saved cache. [Self::cache] remains the explicitly desired cache used
+    /// by the apply path, so an omitted DNS section does not restart the
+    /// running cache.
+    #[serde(default)]
+    pub cache_for_save: Option<DnsCacheConfig>,
 }
 
 impl MergedDnsResolver {
@@ -78,6 +86,10 @@ impl MergedDnsResolver {
             .unwrap_or_default();
 
         let desired_is_empty = desired.is_empty();
+        let cache_for_save = desired
+            .cache
+            .clone()
+            .or_else(|| saved.as_ref().and_then(|s| s.cache.clone()));
         let config = desired.config.clone();
         if let Some(conf) = config.as_ref()
             && !conf.is_empty()
@@ -111,6 +123,7 @@ impl MergedDnsResolver {
             options,
             dynamic_servers,
             previous_static_servers,
+            cache_for_save,
         })
     }
 
@@ -153,7 +166,7 @@ impl MergedDnsResolver {
         DnsResolver {
             running: None,
             config: Some(self.config()),
-            cache: self.cache().cloned(),
+            cache: self.cache_for_save.clone(),
         }
     }
 

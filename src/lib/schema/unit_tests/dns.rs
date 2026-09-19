@@ -3,8 +3,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::{
-    DnsCacheConfig, DnsResolver, DnsUpstreamServer, ErrorKind, NetworkState,
-    doh_url_hostname,
+    DnsCacheConfig, DnsResolver, DnsUpstreamServer, ErrorKind,
+    MergedNetworkState, NetworkState, NipartApplyOption, doh_url_hostname,
 };
 
 const DOC_EXAMPLE_YAML: &str = r#"---
@@ -606,6 +606,54 @@ fn test_dns_resolver_merge_prefers_new_state() {
     let mut keep = old.clone();
     keep.merge(&empty).unwrap();
     assert_eq!(keep, old);
+}
+
+#[test]
+fn test_dns_cache_saved_when_desired_state_omits_dns() {
+    let saved = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        dns-resolver:
+          config:
+            server:
+              - 127.0.0.1
+          cache:
+            enabled: true
+            bind: "127.0.0.1:53"
+        "#,
+    )
+    .unwrap();
+    let desired = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        interfaces:
+          - name: test-dns0
+            type: ethernet
+            state: saved
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedNetworkState::new(
+        desired,
+        NetworkState::default(),
+        Some(saved),
+        NipartApplyOption::default(),
+    )
+    .unwrap();
+
+    let state_to_save = merged.gen_state_for_save();
+    let cache = state_to_save.dns_resolver.cache.clone();
+    assert!(
+        cache.is_some(),
+        "DNS cache must survive an apply that omits `dns-resolver`"
+    );
+    let cache = cache.unwrap();
+    assert!(cache.enabled);
+    assert_eq!(cache.bind, "127.0.0.1:53");
+
+    // An omitted DNS section must not apply or restart the cache.
+    assert!(merged.dns.cache().is_none());
 }
 
 #[test]
