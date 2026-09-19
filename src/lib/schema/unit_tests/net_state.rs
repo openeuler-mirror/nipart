@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ErrorKind, Interface, NetworkState, NipartWaitOnlineCondition};
+use crate::{
+    ErrorKind, Interface, MergedNetworkState, NetworkState, NipartApplyOption,
+    NipartWaitOnlineCondition,
+};
 
 #[test]
 fn test_new_from_yaml_valid_full_state() {
@@ -70,6 +73,97 @@ fn test_new_from_yaml_empty_string() {
     assert!(state.ifaces.is_empty());
     assert!(state.routes.is_empty());
     assert!(state.wait_online.is_none());
+}
+
+#[test]
+fn test_description_and_wait_online_saved_when_desired_omits_them() {
+    let saved = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        description: saved description
+        wait-online:
+          timeout-sec: 60
+          conditions:
+            - gateway4
+        "#,
+    )
+    .unwrap();
+    let desired = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        interfaces:
+          - name: test-saved0
+            type: dummy
+            state: saved
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedNetworkState::new(
+        desired,
+        NetworkState::default(),
+        Some(saved),
+        NipartApplyOption::default(),
+    )
+    .unwrap();
+    let state_to_save = merged.gen_state_for_save();
+
+    assert_eq!(
+        state_to_save.description.as_deref(),
+        Some("saved description")
+    );
+    let wait_online = state_to_save.wait_online.as_ref().unwrap();
+    assert_eq!(wait_online.timeout_sec, 60);
+    assert_eq!(
+        wait_online.conditions,
+        vec![NipartWaitOnlineCondition::Gateway4]
+    );
+}
+
+#[test]
+fn test_description_and_wait_online_override_saved_state() {
+    let saved = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        description: saved description
+        wait-online:
+          timeout-sec: 60
+          conditions:
+            - gateway4
+        "#,
+    )
+    .unwrap();
+    let desired = NetworkState::new_from_yaml(
+        r#"---
+        version: 1
+        description: desired description
+        wait-online:
+          timeout-sec: 5
+          conditions: []
+        interfaces:
+          - name: test-saved0
+            type: dummy
+            state: saved
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedNetworkState::new(
+        desired,
+        NetworkState::default(),
+        Some(saved),
+        NipartApplyOption::default(),
+    )
+    .unwrap();
+    let state_to_save = merged.gen_state_for_save();
+
+    assert_eq!(
+        state_to_save.description.as_deref(),
+        Some("desired description")
+    );
+    let wait_online = state_to_save.wait_online.as_ref().unwrap();
+    assert_eq!(wait_online.timeout_sec, 5);
+    assert!(wait_online.conditions.is_empty());
 }
 
 fn wifi_password(state: &NetworkState) -> Option<&str> {

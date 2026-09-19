@@ -21,11 +21,19 @@ use crate::{
 pub struct MergedNetworkState {
     pub version: Option<u32>,
     pub description: Option<String>,
+    /// Top-level description to persist: the desired description when
+    /// defined, otherwise the previously saved one.
+    #[serde(default)]
+    pub description_for_save: Option<String>,
     pub ifaces: MergedInterfaces,
     pub routes: MergedRoutes,
     pub route_rules: MergedRouteRules,
     pub dns: MergedDnsResolver,
     pub wait_online: NipartWaitOnline,
+    /// Wait-online configuration to persist: the desired configuration when
+    /// defined, otherwise the previously saved one.
+    #[serde(default)]
+    pub wait_online_for_save: Option<NipartWaitOnline>,
     pub option: NipartApplyOption,
     pub desired: NetworkState,
 }
@@ -40,16 +48,29 @@ impl MergedNetworkState {
         let desired_clone = desired.clone();
         desired.validate()?;
 
-        let (saved_ifaces, saved_routes, saved_route_rules, saved_dns) =
-            match saved_config {
-                Some(c) => (
-                    Some(c.ifaces),
-                    Some(c.routes),
-                    Some(c.route_rules),
-                    Some(c.dns_resolver),
-                ),
-                None => (None, None, None, None),
-            };
+        let (
+            saved_ifaces,
+            saved_routes,
+            saved_route_rules,
+            saved_dns,
+            saved_description,
+            saved_wait_online,
+        ) = match saved_config {
+            Some(c) => (
+                Some(c.ifaces),
+                Some(c.routes),
+                Some(c.route_rules),
+                Some(c.dns_resolver),
+                c.description,
+                c.wait_online,
+            ),
+            None => (None, None, None, None, None, None),
+        };
+
+        let description_for_save =
+            desired.description.clone().or(saved_description);
+        let wait_online_for_save =
+            desired.wait_online.clone().or(saved_wait_online);
 
         let merged_ifaces = MergedInterfaces::new_with_force(
             desired.ifaces,
@@ -90,6 +111,7 @@ impl MergedNetworkState {
         Ok(Self {
             version: desired.version,
             description: desired.description.clone(),
+            description_for_save,
             ifaces: merged_ifaces,
             routes: merged_routes,
             route_rules: merged_route_rules,
@@ -98,6 +120,7 @@ impl MergedNetworkState {
                 .wait_online
                 .or(current.wait_online)
                 .unwrap_or_default(),
+            wait_online_for_save,
             option,
             desired: desired_clone,
         })
@@ -133,9 +156,9 @@ impl MergedNetworkState {
             routes: self.routes.gen_state_for_save(),
             route_rules: self.route_rules.gen_state_for_save(),
             dns_resolver: self.dns.gen_state_for_save(),
-            wait_online: self.desired.wait_online.clone(),
+            wait_online: self.wait_online_for_save.clone(),
             version: self.version,
-            description: self.description.clone(),
+            description: self.description_for_save.clone(),
         }
     }
 
