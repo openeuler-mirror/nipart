@@ -112,6 +112,136 @@ fn test_unchanged_lease_gateway_route_is_kept() {
 }
 
 #[test]
+fn test_iface_default_gateway_fingerprint_is_iface_scoped() {
+    let routes = routes_from_yaml(
+        r#"---
+        running:
+          - destination: 0.0.0.0/0
+            next-hop-interface: eth1
+            next-hop-address: 192.0.2.1
+            metric: 700
+            table-id: 254
+          - destination: 0.0.0.0/0
+            next-hop-interface: eth2
+            next-hop-address: 198.51.100.1
+            metric: 700
+            table-id: 254
+        "#,
+    );
+    assert_eq!(
+        iface_default_gateway_fingerprint(
+            routes.running.iter().flatten(),
+            "eth1"
+        ),
+        vec!["eth1|192.0.2.1|700|254".to_string()]
+    );
+    // An interface without a default route must not inherit the gateway of
+    // another interface, otherwise every lease renewal would notify.
+    assert!(
+        iface_default_gateway_fingerprint(
+            routes.running.iter().flatten(),
+            "eth3"
+        )
+        .is_empty()
+    );
+}
+
+/// The lease routes are applied by the DHCP worker instead of the daemon
+/// apply path, so the worker has to tell the daemon when a lease replaced
+/// the default gateway the DNS cache upstreams were using.
+#[test]
+fn test_lease_gateway_change_notifies_daemon() {
+    let cur_routes = routes_from_yaml(
+        r#"---
+        running:
+          - destination: 0.0.0.0/0
+            next-hop-interface: eth1
+            next-hop-address: 198.51.100.1
+            metric: 700
+            table-id: 254
+        "#,
+    );
+    let base_iface = base_iface_with_auto_route_metric(Some(700));
+    let lease = lease_with_gateway();
+    let gateway_before = iface_default_gateway_fingerprint(
+        cur_routes.running.iter().flatten(),
+        base_iface.name.as_str(),
+    );
+    let routes = gen_routes(&lease, &base_iface);
+    let gateway_after =
+        default_gateway_fingerprint(routes.config.iter().flatten());
+    assert_ne!(gateway_before, gateway_after);
+
+    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+    notify_daemon_on_gateway_change(
+        &base_iface,
+        gateway_before,
+        gateway_after,
+        Some(&sender),
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(NipartManagerCmd::GatewayChanged)
+    ));
+}
+
+#[test]
+fn test_same_lease_gateway_does_not_notify_daemon() {
+    // A renewal of the same lease (same gateway, metric and table) must not
+    // reset the upstream transports of the DNS cache.
+    let cur_routes = routes_from_yaml(
+        r#"---
+        running:
+          - destination: 0.0.0.0/0
+            next-hop-interface: eth1
+            next-hop-address: 192.0.2.1
+            metric: 700
+            table-id: 254
+        "#,
+    );
+    let base_iface = base_iface_with_auto_route_metric(Some(700));
+    let lease = lease_with_gateway();
+    let gateway_before = iface_default_gateway_fingerprint(
+        cur_routes.running.iter().flatten(),
+        base_iface.name.as_str(),
+    );
+    let routes = gen_routes(&lease, &base_iface);
+    let gateway_after =
+        default_gateway_fingerprint(routes.config.iter().flatten());
+    assert_eq!(gateway_before, gateway_after);
+
+    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+    notify_daemon_on_gateway_change(
+        &base_iface,
+        gateway_before,
+        gateway_after,
+        Some(&sender),
+    );
+
+    assert!(
+        matches!(
+            receiver.try_recv(),
+            Err(futures_channel::mpsc::TryRecvError::Empty)
+        ),
+        "a renewal of the same gateway must not notify the daemon"
+    );
+}
+
+#[test]
+fn test_gateway_change_without_daemon_sender_is_ignored() {
+    // The worker can be built without a daemon (unit tests, standalone
+    // uses): the missing notification must not panic.
+    let base_iface = base_iface_with_auto_route_metric(Some(700));
+    notify_daemon_on_gateway_change(
+        &base_iface,
+        vec!["eth1|198.51.100.1|700|254".to_string()],
+        Vec::new(),
+        None,
+    );
+}
+
+#[test]
 fn test_route_of_other_iface_or_metric_is_kept() {
     let cur_routes = routes_from_yaml(
         r#"---

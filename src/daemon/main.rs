@@ -8,6 +8,7 @@ mod daemon;
 mod dhcp;
 mod dns;
 mod dns_auto;
+mod dns_gateway;
 mod event;
 mod iface_action;
 mod lock;

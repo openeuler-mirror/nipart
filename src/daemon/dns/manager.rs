@@ -67,6 +67,21 @@ impl NipartDnsManager {
         Ok(())
     }
 
+    /// Notify the running cache that the network path of its upstream
+    /// nameservers changed, e.g. the default gateway was replaced by a
+    /// route apply, a DHCP lease or the boot-up state restore.
+    ///
+    /// The cache keeps its cached replies but retries the upstream groups
+    /// which were marked dead instead of waiting out their retry backoff.
+    /// A stopped cache is not an error: a cache started later has no
+    /// failure state to clear.
+    pub(crate) async fn notify_network_change(
+        &mut self,
+    ) -> Result<(), NipartError> {
+        self.mgr.exec(NipartDnsCmd::NotifyNetworkChange).await?;
+        Ok(())
+    }
+
     pub(crate) async fn stop(&mut self) -> Result<(), NipartError> {
         self.mgr.exec(NipartDnsCmd::Stop).await?;
         Ok(())

@@ -52,7 +52,7 @@ impl NipartCommander {
         sender: UnboundedSender<NipartManagerCmd>,
     ) -> Result<Self, NipartError> {
         let mut ret = Self {
-            dhcpv4_manager: NipartDhcpV4Manager::new().await?,
+            dhcpv4_manager: NipartDhcpV4Manager::new(sender.clone()).await?,
             dhcpv6_manager: NipartDhcpV6Manager::new().await?,
             dns_manager: NipartDnsManager::new().await?,
             monitor_manager: NipartMonitorManager::new(sender.clone()).await?,

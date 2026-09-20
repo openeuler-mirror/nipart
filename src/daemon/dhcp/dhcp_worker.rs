@@ -17,11 +17,14 @@ use nipart::{
     NipartNoDaemon, NipartQueryOption, RouteEntry, RouteState, Routes,
 };
 
-use crate::TaskWorker;
+use crate::{
+    TaskWorker, daemon::NipartManagerCmd,
+    dns_gateway::default_gateway_fingerprint,
+};
 
 const DEFAULT_ROUTE_TABLE_ID: u32 = 254;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) enum NipartDhcpCmd {
     StartIfaceDhcp(Box<BaseInterface>),
     StopIfaceDhcp(String),
@@ -29,6 +32,10 @@ pub(crate) enum NipartDhcpCmd {
     /// Nameservers learned from the current leases, keyed by interface
     /// name.  Used as `auto-dns` upstream of the DNS cache.
     Nameservers,
+    /// Set the sender used to notify the daemon.  Must be invoked right
+    /// after the worker started; without it the DHCP worker cannot report
+    /// a changed default gateway to the daemon.
+    SetCommanderSender(UnboundedSender<NipartManagerCmd>),
 }
 
 impl std::fmt::Display for NipartDhcpCmd {
@@ -45,6 +52,9 @@ impl std::fmt::Display for NipartDhcpCmd {
             }
             Self::Nameservers => {
                 write!(f, "nameservers-dhcp")
+            }
+            Self::SetCommanderSender(_) => {
+                write!(f, "set-commander-sender-dhcp")
             }
         }
     }
@@ -64,6 +74,9 @@ type FromManager =
 pub(crate) struct NipartDhcpV4Worker {
     threads: HashMap<String, NipartDhcpV4Thread>,
     receiver: UnboundedReceiver<FromManager>,
+    /// Sender for notifying the daemon, e.g. that a lease changed the
+    /// default gateway.  `None` until `SetCommanderSender` arrives.
+    msg_to_daemon: Option<UnboundedSender<NipartManagerCmd>>,
 }
 
 impl TaskWorker for NipartDhcpV4Worker {
@@ -79,6 +92,7 @@ impl TaskWorker for NipartDhcpV4Worker {
         Ok(Self {
             threads: HashMap::new(),
             receiver,
+            msg_to_daemon: None,
         })
     }
 
@@ -91,9 +105,17 @@ impl TaskWorker for NipartDhcpV4Worker {
         cmd: NipartDhcpCmd,
     ) -> Result<NipartDhcpReply, NipartError> {
         match cmd {
+            NipartDhcpCmd::SetCommanderSender(msg_to_daemon) => {
+                self.msg_to_daemon = Some(msg_to_daemon);
+                Ok(NipartDhcpReply::None)
+            }
             NipartDhcpCmd::StartIfaceDhcp(base_iface) => {
                 let iface_name = base_iface.name.clone();
-                let thread = NipartDhcpV4Thread::new(*base_iface).await?;
+                let thread = NipartDhcpV4Thread::new(
+                    *base_iface,
+                    self.msg_to_daemon.clone(),
+                )
+                .await?;
                 self.threads.insert(iface_name.clone(), thread);
                 log::debug!("DHCP thread started on interface {iface_name}");
                 Ok(NipartDhcpReply::None)
@@ -142,6 +164,7 @@ pub(crate) struct NipartDhcpV4Thread {
 impl NipartDhcpV4Thread {
     pub(crate) async fn new(
         base_iface: BaseInterface,
+        msg_to_daemon: Option<UnboundedSender<NipartManagerCmd>>,
     ) -> Result<Self, NipartError> {
         let (sender, receiver) = unbounded();
         let ret = Self {
@@ -201,8 +224,14 @@ impl NipartDhcpV4Thread {
 
         let share_data = ret.share_data.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                dhcp_thread(dhcp_client, base_iface, receiver, share_data).await
+            if let Err(e) = dhcp_thread(
+                dhcp_client,
+                base_iface,
+                receiver,
+                share_data,
+                msg_to_daemon,
+            )
+            .await
             {
                 log::error!("{e}");
             }
@@ -244,6 +273,7 @@ async fn dhcp_thread(
     base_iface: BaseInterface,
     mut quit_indicator: UnboundedReceiver<()>,
     share_data: Arc<Mutex<NipartDhcpShareData>>,
+    msg_to_daemon: Option<UnboundedSender<NipartManagerCmd>>,
 ) -> Result<(), NipartError> {
     log::debug!(
         "Waiting link carrier up for interface {}/{} before start DHCP",
@@ -295,7 +325,8 @@ async fn dhcp_thread(
                         if let Err(e) = apply_lease(
                             &base_iface,
                             &lease,
-                            share_data.clone()
+                            share_data.clone(),
+                            msg_to_daemon.as_ref(),
                         ).await {
                             break Err(e);
                         }
@@ -356,6 +387,7 @@ async fn apply_lease(
     lease: &DhcpV4Lease,
     // TODO: Support hostname, systemd-resolved
     share_data: Arc<Mutex<NipartDhcpShareData>>,
+    msg_to_daemon: Option<&UnboundedSender<NipartManagerCmd>>,
 ) -> Result<(), NipartError> {
     log::debug!(
         "Applying DHCPv4 lease {}/{} to interface {}({})",
@@ -410,13 +442,77 @@ async fn apply_lease(
         NipartNoDaemon::query_network_state(NipartQueryOption::running())
             .await?
             .routes;
+    // The lease routes are applied here instead of the daemon apply path,
+    // so the daemon cannot compare the default routes itself: remember the
+    // gateway of the path in use before this lease and that of the lease.
+    let gateway_before = iface_default_gateway_fingerprint(
+        cur_routes.running.iter().flatten(),
+        base_iface.name.as_str(),
+    );
     let mut routes = gen_routes(lease, base_iface);
+    let gateway_after =
+        default_gateway_fingerprint(routes.config.iter().flatten());
     mark_replaced_routes_absent(&mut routes, &cur_routes);
     net_state.routes = routes;
 
     let apply_opt = NipartApplyOption::new().memory_only().no_verify();
     NipartNoDaemon::apply_network_state(net_state, apply_opt).await?;
+    notify_daemon_on_gateway_change(
+        base_iface,
+        gateway_before,
+        gateway_after,
+        msg_to_daemon,
+    );
     Ok(())
+}
+
+/// Tell the daemon when this lease changed the default gateway.
+///
+/// The daemon then notifies the DNS cache so the upstream groups which
+/// failed while the old gateway was in use are retried at once instead of
+/// failing fast until their retry cooldown elapsed.  A failure to notify
+/// is logged only: the lease is applied and the cache keeps its own retry
+/// cooldown as fallback.
+fn notify_daemon_on_gateway_change(
+    base_iface: &BaseInterface,
+    gateway_before: Vec<String>,
+    gateway_after: Vec<String>,
+    msg_to_daemon: Option<&UnboundedSender<NipartManagerCmd>>,
+) {
+    let Some(msg_to_daemon) = msg_to_daemon else {
+        return;
+    };
+    if gateway_before == gateway_after {
+        return;
+    }
+    log::debug!(
+        "DHCPv4 lease on {} changed the default gateway from \
+         {gateway_before:?} to {gateway_after:?}, notifying the daemon",
+        base_iface.name
+    );
+    if msg_to_daemon
+        .unbounded_send(NipartManagerCmd::GatewayChanged)
+        .is_err()
+    {
+        log::debug!("Failed to notify the daemon about the gateway change");
+    }
+}
+
+/// Fingerprint of the default routes of `iface_name` in `routes`.
+///
+/// Only the routes of the interface getting the new lease can change while
+/// a lease is applied, so comparing its default routes before and after the
+/// apply detects a replaced default gateway without querying the kernel a
+/// second time.
+fn iface_default_gateway_fingerprint<'a>(
+    routes: impl IntoIterator<Item = &'a RouteEntry>,
+    iface_name: &str,
+) -> Vec<String> {
+    default_gateway_fingerprint(
+        routes.into_iter().filter(|route| {
+            route.next_hop_iface.as_deref() == Some(iface_name)
+        }),
+    )
 }
 
 /// Mark the installed routes which the new lease replaces as absent.

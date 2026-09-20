@@ -28,6 +28,11 @@ const DNS_AUTO_REFRESH_INTERVAL: std::time::Duration =
 #[derive(Debug, Clone)]
 pub(crate) enum NipartManagerCmd {
     LinkEvent(Box<InterfaceLinkEvent>),
+    /// A manager changed the host default gateway, e.g. the DHCP worker
+    /// installed the default route of a new lease. The DNS cache is
+    /// notified so the upstream groups which failed on the old network
+    /// path are retried at once.
+    GatewayChanged,
 }
 
 #[derive(Debug)]
@@ -205,6 +210,21 @@ impl NipartDaemon {
         }
     }
 
+    /// Notify the DNS cache that the host default gateway changed.
+    ///
+    /// The apply, rollback and boot paths notify the cache from the
+    /// commander (they know the routes before and after); this path covers
+    /// the default routes installed by the DHCP workers.  A failure to
+    /// notify must not take the daemon down: the cache then falls back to
+    /// its own retry cooldown.
+    async fn handle_gateway_changed(&mut self) {
+        if let Err(e) = self.commander.notify_dns_cache_network_change().await {
+            log::debug!(
+                "Failed to notify DNS cache about the gateway change: {e}"
+            );
+        }
+    }
+
     /// Notify the plugins that the host resumed from suspend.
     ///
     /// The wifi plugin forwards this to shuli, which re-checks whether
@@ -245,6 +265,9 @@ impl NipartDaemon {
                 {
                     log::error!("{e}");
                 }
+            }
+            NipartManagerCmd::GatewayChanged => {
+                self.handle_gateway_changed().await;
             }
         }
     }
