@@ -134,6 +134,15 @@ sudo npt show -s
 sudo npt show wlan0
 ```
 
+### Show only DNS resolver or routes section
+
+```bash
+sudo npt show dns
+sudo npt show route
+# Show an interface/profile whose name collides with the section keywords
+sudo npt show --iface route
+```
+
 ### Scan WIFI networks
 
 ```bash

@@ -116,17 +116,22 @@ dns-resolver:
 
 ## Notes
 
-* Every nameserver entry accepts a plain IP address, an `IP:PORT` pair or a
+- Every nameserver entry accepts a plain IP address, an `IP:PORT` pair or a
   DNS-over-HTTPS URL (`https://server/dns-query`). A plain IP address uses
   the default DNS port 53.
-* When the cache is enabled, its `bind` address must be the first entry of
+- When the cache is enabled, its `bind` address must be the first entry of
   `dns-resolver.config.server`, otherwise the host resolver would never
   send a query to the cache. Such an apply is rejected instead of silently
   leaving the cache unused.
-* A group with an empty `nameservers` list is a blocking group: matching
+- A group with an empty `nameservers` list is a blocking group: matching
   queries get `NXDOMAIN` without any upstream query.
-* Domain matching is longest suffix match, so a more specific domain in one
+- Domain matching is longest suffix match, so a more specific domain in one
   group wins over a parent domain in another group.
-* The cache is a daemon task. `npt` without the daemon only supports the
+- The cache retries the upstream groups which failed while the previous
+  network path was in use when the default gateway changes: a route apply,
+  a DHCP lease or the boot-up state restore notifies the cache, so the
+  next query probes a previously dead upstream instead of failing fast
+  until its retry backoff elapsed. Cached replies are kept.
+- The cache is a daemon task. `npt` without the daemon only supports the
   standard resolver (`dns-resolver.config`); a cache configuration needs
   the `nipart` daemon.

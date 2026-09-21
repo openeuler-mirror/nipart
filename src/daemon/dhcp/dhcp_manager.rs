@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use futures_channel::mpsc::UnboundedSender;
 use nipart::{
     BaseInterface, MergedNetworkState, NetworkState, NipartError,
     NipartInterface, NipartIpcConnection, NipartNoDaemon,
@@ -12,7 +13,10 @@ use super::{
     should_touch_dhcp, wait_wifi_ssid, wifi_cfg_ssid_changed,
     wifi_ssid_changed,
 };
-use crate::{TaskManager, log_debug, plugin::NipartPluginManager};
+use crate::{
+    TaskManager, daemon::NipartManagerCmd, log_debug,
+    plugin::NipartPluginManager,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct NipartDhcpV4Manager {
@@ -23,10 +27,19 @@ pub(crate) struct NipartDhcpV4Manager {
 // into Mutex protected `NipartDaemonShareData`. The
 // `MutexGuard` will cause function not `Send`.
 impl NipartDhcpV4Manager {
-    pub(crate) async fn new() -> Result<Self, NipartError> {
-        Ok(Self {
+    pub(crate) async fn new(
+        msg_to_daemon: UnboundedSender<NipartManagerCmd>,
+    ) -> Result<Self, NipartError> {
+        let mut ret = Self {
             mgr: TaskManager::new::<NipartDhcpV4Worker>("dhcp").await?,
-        })
+        };
+        // The worker applies DHCP leases outside of the daemon apply path,
+        // hence it needs the daemon sender to report a changed default
+        // gateway of a new lease.
+        ret.mgr
+            .exec(NipartDhcpCmd::SetCommanderSender(msg_to_daemon))
+            .await?;
+        Ok(ret)
     }
 
     pub(crate) async fn shutdown(&self) {

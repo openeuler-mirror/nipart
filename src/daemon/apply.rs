@@ -109,6 +109,11 @@ impl NipartCommander {
         self.monitor_manager.resume().await?;
         let (merged_state, saved_state) = result?;
 
+        // A changed default gateway makes upstreams which were unreachable
+        // reachable again: let the DNS cache retry the upstream groups it
+        // marked dead instead of waiting out their retry backoff.
+        self.notify_dns_cache_on_gateway_change(&merged_state).await;
+
         let mut diff_state = match merged_state.gen_diff() {
             Ok(s) => s,
             Err(e) => {
@@ -235,6 +240,10 @@ impl NipartCommander {
         self.dhcpv6_manager
             .apply_dhcp_config(conn, &merged_state, &mut self.plugin_manager)
             .await?;
+
+        // The rollback restored the routes of the state before the failed
+        // apply, which may have changed the default gateway as well.
+        self.notify_dns_cache_on_gateway_change(&merged_state).await;
 
         Ok(())
     }

@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 
 use futures_channel::{mpsc::UnboundedReceiver, oneshot::Sender};
-use mudz::MudzServer;
+use mudz::{MudzNotifier, MudzServer};
 use nipart::{ErrorKind, NipartError};
 use tokio::{sync::oneshot as tokio_oneshot, task::JoinHandle};
 
@@ -14,6 +14,13 @@ use crate::TaskWorker;
 pub(crate) enum NipartDnsCmd {
     Start(NipartDnsServerConfig),
     RefreshAutoDns(Vec<IpAddr>),
+    /// The network path of the upstream nameservers changed, e.g. the
+    /// default gateway was replaced by a route apply, a DHCP lease or the
+    /// boot-up state restore. The running cache server keeps its cached
+    /// replies but clears the upstream failure state and retries the
+    /// upstream groups which were marked dead. No-op when no cache server
+    /// is running: a cache started later has no failure state to clear.
+    NotifyNetworkChange,
     Stop,
     /// Query whether the cache server is running.  Kept for status
     /// reporting of future `npt` DNS commands.
@@ -28,6 +35,7 @@ impl std::fmt::Display for NipartDnsCmd {
             Self::RefreshAutoDns(servers) => {
                 write!(f, "refresh-auto-dns:{}", servers.len())
             }
+            Self::NotifyNetworkChange => write!(f, "notify-network-change"),
             Self::Stop => write!(f, "stop"),
             Self::Query => write!(f, "query"),
         }
@@ -46,6 +54,10 @@ type FromManager = (NipartDnsCmd, Sender<Result<NipartDnsReply, NipartError>>);
 #[derive(Debug)]
 struct RunningDnsServer {
     config: NipartDnsServerConfig,
+    /// Handle reporting host environment changes which the embedded cache
+    /// server cannot observe through its own sockets, e.g. a new default
+    /// gateway learned from DHCP.
+    notifier: MudzNotifier,
     shutdown: tokio_oneshot::Sender<()>,
     handle: JoinHandle<()>,
 }
@@ -100,6 +112,15 @@ impl TaskWorker for NipartDnsWorker {
                 }
                 Ok(NipartDnsReply::None)
             }
+            NipartDnsCmd::NotifyNetworkChange => {
+                if let Some(running) = self.running.as_ref() {
+                    running
+                        .notifier
+                        .notify_network_change()
+                        .map_err(mudz_error)?;
+                }
+                Ok(NipartDnsReply::None)
+            }
             NipartDnsCmd::Stop => {
                 self.stop_server().await;
                 Ok(NipartDnsReply::None)
@@ -121,6 +142,10 @@ impl NipartDnsWorker {
         let server = MudzServer::new(config.mudz_config())
             .await
             .map_err(mudz_error)?;
+        // Create the notifier before the server is moved into the serving
+        // task: a new default gateway is reported through it while the
+        // server runs.
+        let notifier = server.notifier();
         let (shutdown, shutdown_rx) = tokio_oneshot::channel::<()>();
         let bind = config.bind;
         let handle = tokio::spawn(async move {
@@ -135,6 +160,7 @@ impl NipartDnsWorker {
         });
         self.running = Some(RunningDnsServer {
             config,
+            notifier,
             shutdown,
             handle,
         });
