@@ -6,6 +6,10 @@ use nipart::{
 
 use super::*;
 
+fn new_show_matches(args: &[&str]) -> clap::ArgMatches {
+    CommandShow::new_cmd().try_get_matches_from(args).unwrap()
+}
+
 fn new_route(destination: &str, next_hop_iface: &str) -> RouteEntry {
     let mut rt = RouteEntry::default();
     rt.destination = Some(destination.to_string());
@@ -108,4 +112,72 @@ fn test_filter_net_state_by_profile_name() {
 fn test_filter_routes_empty_input() {
     assert!(filter_routes(None, "mynet", &[]).is_none());
     assert!(filter_routes(Some(&[]), "mynet", &[]).is_none());
+}
+
+#[test]
+fn test_show_selection_keywords() {
+    let matches = new_show_matches(&["show", "dns"]);
+    assert_eq!(
+        ShowSelection::from_matches(&matches),
+        ShowSelection::Section(ShowSection::Dns)
+    );
+
+    let matches = new_show_matches(&["show", "route"]);
+    assert_eq!(
+        ShowSelection::from_matches(&matches),
+        ShowSelection::Section(ShowSection::Route)
+    );
+}
+
+#[test]
+fn test_show_selection_iface() {
+    let matches = new_show_matches(&["show", "eth1"]);
+    assert_eq!(
+        ShowSelection::from_matches(&matches),
+        ShowSelection::Iface("eth1".to_string())
+    );
+
+    let matches = new_show_matches(&["show", "--iface", "route"]);
+    assert_eq!(
+        ShowSelection::from_matches(&matches),
+        ShowSelection::Iface("route".to_string())
+    );
+
+    let matches = new_show_matches(&["show"]);
+    assert_eq!(ShowSelection::from_matches(&matches), ShowSelection::All);
+}
+
+#[test]
+fn test_iface_option_conflicts_with_positional_name() {
+    assert!(
+        CommandShow::new_cmd()
+            .try_get_matches_from(["show", "dns", "--iface", "dns"])
+            .is_err()
+    );
+}
+
+#[test]
+fn test_section_to_yaml_dns_only() {
+    let net_state = net_state_with_two_ifaces_and_routes();
+    let yaml = section_to_yaml(&net_state, ShowSection::Dns).unwrap();
+    let value: rmsd_yaml::Value = rmsd_yaml::from_str(&yaml).unwrap();
+    let map = value.as_mapping().unwrap();
+
+    assert!(map.contains_key(&rmsd_yaml::Value::from("dns-resolver")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("routes")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("interfaces")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("version")));
+}
+
+#[test]
+fn test_section_to_yaml_route_only() {
+    let net_state = net_state_with_two_ifaces_and_routes();
+    let yaml = section_to_yaml(&net_state, ShowSection::Route).unwrap();
+    let value: rmsd_yaml::Value = rmsd_yaml::from_str(&yaml).unwrap();
+    let map = value.as_mapping().unwrap();
+
+    assert!(map.contains_key(&rmsd_yaml::Value::from("routes")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("dns-resolver")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("interfaces")));
+    assert!(!map.contains_key(&rmsd_yaml::Value::from("version")));
 }
