@@ -1,8 +1,157 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
 use nipart::InterfaceType;
 
 use super::*;
+
+#[derive(Debug)]
+struct MockDhcpV4Client {
+    results: Arc<Mutex<VecDeque<Result<DhcpV4State, NipartError>>>>,
+    run_count: Arc<AtomicUsize>,
+    clean_up_count: Arc<AtomicUsize>,
+}
+
+impl MockDhcpV4Client {
+    fn new(
+        results: Vec<Result<DhcpV4State, NipartError>>,
+    ) -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let run_count = Arc::new(AtomicUsize::new(0));
+        let clean_up_count = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                results: Arc::new(Mutex::new(results.into())),
+                run_count: run_count.clone(),
+                clean_up_count: clean_up_count.clone(),
+            },
+            run_count,
+            clean_up_count,
+        )
+    }
+
+    fn with_shared_counters(
+        results: Arc<Mutex<VecDeque<Result<DhcpV4State, NipartError>>>>,
+        run_count: Arc<AtomicUsize>,
+        clean_up_count: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            results,
+            run_count,
+            clean_up_count,
+        }
+    }
+}
+
+impl DhcpV4ClientOps for MockDhcpV4Client {
+    fn run(&mut self) -> DhcpV4RunFuture<'_> {
+        Box::pin(async move {
+            self.run_count.fetch_add(1, Ordering::SeqCst);
+            self.results.lock().unwrap().pop_front().unwrap()
+        })
+    }
+
+    fn clean_up(&mut self) {
+        self.clean_up_count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn mock_lease() -> DhcpV4State {
+    DhcpV4State::Done(Box::default())
+}
+
+/// A hard `run()` error must not stop DHCPv4 on the interface: the client
+/// is cleaned up, re-initialized and kept running.
+#[tokio::test]
+async fn test_next_dhcpv4_lease_restarts_client_on_error() {
+    let (mut client, run_count, clean_up_count) = MockDhcpV4Client::new(vec![
+        Err(NipartError::new(
+            ErrorKind::Bug,
+            "mock DHCPv4 client failure".to_string(),
+        )),
+        Ok(mock_lease()),
+    ]);
+    let share_data = Arc::new(Mutex::new(NipartDhcpShareData::default()));
+    let (_quit_sender, mut quit_indicator) =
+        futures_channel::mpsc::unbounded::<()>();
+    let base_iface =
+        BaseInterface::new("eth1".to_string(), InterfaceType::Ethernet);
+    let init_count = Arc::new(AtomicUsize::new(0));
+    let init_count_clone = init_count.clone();
+    let results = client.results.clone();
+    let run_count_clone = run_count.clone();
+    let clean_up_count_clone = clean_up_count.clone();
+
+    let lease = next_dhcpv4_lease(
+        &mut client,
+        &base_iface,
+        &share_data,
+        &mut quit_indicator,
+        || {
+            init_count_clone.fetch_add(1, Ordering::SeqCst);
+            let results = results.clone();
+            let run_count = run_count_clone.clone();
+            let clean_up_count = clean_up_count_clone.clone();
+            async move {
+                Ok(MockDhcpV4Client::with_shared_counters(
+                    results,
+                    run_count,
+                    clean_up_count,
+                ))
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(lease.is_some());
+    assert_eq!(run_count.load(Ordering::SeqCst), 2);
+    assert_eq!(clean_up_count.load(Ordering::SeqCst), 1);
+    assert_eq!(init_count.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        share_data.lock().unwrap().state,
+        DhcpState::Running
+    ));
+}
+
+#[tokio::test]
+async fn test_next_dhcpv4_lease_does_not_restart_on_success() {
+    let (mut client, run_count, clean_up_count) =
+        MockDhcpV4Client::new(vec![Ok(mock_lease())]);
+    let share_data = Arc::new(Mutex::new(NipartDhcpShareData::default()));
+    let (_quit_sender, mut quit_indicator) =
+        futures_channel::mpsc::unbounded::<()>();
+    let base_iface =
+        BaseInterface::new("eth1".to_string(), InterfaceType::Ethernet);
+    let init_count = Arc::new(AtomicUsize::new(0));
+    let init_count_clone = init_count.clone();
+
+    let lease = next_dhcpv4_lease(
+        &mut client,
+        &base_iface,
+        &share_data,
+        &mut quit_indicator,
+        || {
+            init_count_clone.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(NipartError::new(
+                    ErrorKind::Bug,
+                    "unexpected client restart".to_string(),
+                ))
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(lease.is_some());
+    assert_eq!(run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(clean_up_count.load(Ordering::SeqCst), 0);
+    assert_eq!(init_count.load(Ordering::SeqCst), 0);
+}
 
 fn base_iface_with_auto_route_metric(
     auto_route_metric: Option<i64>,
