@@ -2,7 +2,10 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use futures_channel::{
@@ -14,7 +17,8 @@ use mozim::{DhcpV4Client, DhcpV4Config, DhcpV4Lease, DhcpV4State};
 use nipart::{
     BaseInterface, DhcpState, ErrorKind, Interface, InterfaceIpAddr,
     InterfaceIpv4, NetworkState, NipartApplyOption, NipartError,
-    NipartNoDaemon, NipartQueryOption, RouteEntry, RouteState, Routes,
+    NipartInterface, NipartNoDaemon, NipartQueryOption, RouteEntry, RouteState,
+    Routes,
 };
 
 use crate::{
@@ -23,6 +27,41 @@ use crate::{
 };
 
 const DEFAULT_ROUTE_TABLE_ID: u32 = 254;
+/// Delay before re-initializing a DHCPv4 client which returned an error.
+/// This gives the link/driver time to settle without stalling the retry for
+/// long: the DHCP state machine keeps retrying protocol-level failures on
+/// its own, so this path only handles hard client errors.
+const DHCPV4_RESTART_DELAY_MS: u64 = 1000;
+
+type DhcpV4RunFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<DhcpV4State, NipartError>> + Send + 'a>>;
+
+/// Minimal DHCPv4 client operations used by [`next_dhcpv4_lease()`].
+///
+/// The trait exists so unit tests can inject a fake client and verify that a
+/// hard `run()` error restarts the client instead of permanently stopping
+/// DHCP on the interface.
+trait DhcpV4ClientOps {
+    fn run(&mut self) -> DhcpV4RunFuture<'_>;
+    fn clean_up(&mut self);
+}
+
+impl DhcpV4ClientOps for DhcpV4Client {
+    fn run(&mut self) -> DhcpV4RunFuture<'_> {
+        Box::pin(async move {
+            DhcpV4Client::run(self).await.map_err(|e| {
+                NipartError::new(
+                    ErrorKind::Bug,
+                    format!("Unhandled DHCPv4 error: {e}"),
+                )
+            })
+        })
+    }
+
+    fn clean_up(&mut self) {
+        DhcpV4Client::clean_up(self);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum NipartDhcpCmd {
@@ -172,55 +211,7 @@ impl NipartDhcpV4Thread {
             _quit_notifer: sender,
             share_data: Arc::new(Mutex::new(NipartDhcpShareData::default())),
         };
-        let mac_addr = match base_iface.mac_address.as_deref() {
-            Some(m) => m,
-            None => {
-                return Err(NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "Got no MAC address for DHCPv4 on interface {}({})",
-                        base_iface.name, base_iface.iface_type
-                    ),
-                ));
-            }
-        };
-        let iface_index = match base_iface.iface_index {
-            Some(m) => m,
-            None => {
-                return Err(NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "Got no interface index for DHCPv4 on interface {}({})",
-                        base_iface.name, base_iface.iface_type
-                    ),
-                ));
-            }
-        };
-        let mut dhcp_config = DhcpV4Config::new(base_iface.name.as_str());
-        dhcp_config
-            .set_iface_index(iface_index)
-            .set_iface_mac(mac_addr)
-            .map_err(|e| {
-                NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "Failed to set iface {}/{} MAC {}: {e}",
-                        base_iface.name, base_iface.iface_type, mac_addr,
-                    ),
-                )
-            })?
-            .use_mac_as_client_id();
-        // TODO(Gris Ge): Support loading previous stored lease
-        let dhcp_client =
-            DhcpV4Client::init(dhcp_config, None).await.map_err(|e| {
-                NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "Failed to start DHCPv4 client on iface {}/{}: {e}",
-                        base_iface.name, base_iface.iface_type,
-                    ),
-                )
-            })?;
+        let dhcp_client = init_dhcpv4_client(&base_iface).await?;
 
         let share_data = ret.share_data.clone();
         tokio::spawn(async move {
@@ -268,6 +259,186 @@ impl NipartDhcpV4Thread {
     }
 }
 
+async fn init_dhcpv4_client(
+    base_iface: &BaseInterface,
+) -> Result<DhcpV4Client, NipartError> {
+    let mac_addr = match base_iface.mac_address.as_deref() {
+        Some(m) => m,
+        None => {
+            return Err(NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "Got no MAC address for DHCPv4 on interface {}({})",
+                    base_iface.name, base_iface.iface_type
+                ),
+            ));
+        }
+    };
+    let iface_index = match base_iface.iface_index {
+        Some(m) => m,
+        None => {
+            return Err(NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "Got no interface index for DHCPv4 on interface {}({})",
+                    base_iface.name, base_iface.iface_type
+                ),
+            ));
+        }
+    };
+    let mut dhcp_config = DhcpV4Config::new(base_iface.name.as_str());
+    dhcp_config
+        .set_iface_index(iface_index)
+        .set_iface_mac(mac_addr)
+        .map_err(|e| {
+            NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "Failed to set iface {}/{} MAC {}: {e}",
+                    base_iface.name, base_iface.iface_type, mac_addr,
+                ),
+            )
+        })?
+        .use_mac_as_client_id();
+    // TODO(Gris Ge): Support loading previous stored lease
+    DhcpV4Client::init(dhcp_config, None).await.map_err(|e| {
+        NipartError::new(
+            ErrorKind::Bug,
+            format!(
+                "Failed to start DHCPv4 client on iface {}/{}: {e}",
+                base_iface.name, base_iface.iface_type,
+            ),
+        )
+    })
+}
+
+/// Re-resolve the interface before starting a new DHCPv4 client after a
+/// hard client error.  A driver reset or USB re-enumeration can change the
+/// interface index while the client was running, so reusing the old index
+/// would make every restart fail.
+async fn init_dhcpv4_client_for_retry(
+    base_iface: &BaseInterface,
+) -> Result<DhcpV4Client, NipartError> {
+    NipartNoDaemon::wait_link_carrier_up(base_iface.name.as_str()).await?;
+    let mut refreshed_base_iface = base_iface.clone();
+    let cur_state =
+        NipartNoDaemon::query_network_state(NipartQueryOption::running())
+            .await?;
+    if let Some(cur_iface) =
+        cur_state.ifaces.kernel_ifaces.values().find(|cur_iface| {
+            cur_iface.kernel_iface_name() == base_iface.name
+                || cur_iface.name() == base_iface.name
+                || base_iface.mac_address.as_deref().is_some_and(|mac| {
+                    cur_iface.base_iface().mac_address.as_deref().is_some_and(
+                        |cur_mac| cur_mac.eq_ignore_ascii_case(mac),
+                    )
+                })
+        })
+    {
+        refreshed_base_iface.iface_index = cur_iface.base_iface().iface_index;
+        if cur_iface.base_iface().mac_address.is_some() {
+            refreshed_base_iface.mac_address =
+                cur_iface.base_iface().mac_address.clone();
+        }
+    }
+    init_dhcpv4_client(&refreshed_base_iface).await
+}
+
+fn set_state(
+    share_data: &Arc<Mutex<NipartDhcpShareData>>,
+    state: DhcpState,
+    base_iface: &BaseInterface,
+) -> Result<(), NipartError> {
+    match share_data.lock() {
+        Ok(mut share_data) => {
+            share_data.state = state;
+            Ok(())
+        }
+        Err(e) => Err(NipartError::new(
+            ErrorKind::Bug,
+            format!(
+                "Failed to lock DHCPv4 {}({}) share data: {e}",
+                base_iface.name, base_iface.iface_type,
+            ),
+        )),
+    }
+}
+
+/// Wait for the next lease, restarting the client on any hard `run()` error.
+///
+/// Protocol-level DHCP retries (DISCOVER/REQUEST/RENEW/REBIND) are handled
+/// inside `mozim`.  This loop only covers errors which make `run()` return,
+/// for example a socket/driver failure: such an error must not leave the
+/// interface without a DHCP client until an unrelated apply happens.
+///
+/// A `None` result means the worker was requested to quit.
+async fn next_dhcpv4_lease<C, Init, InitFut>(
+    client: &mut C,
+    base_iface: &BaseInterface,
+    share_data: &Arc<Mutex<NipartDhcpShareData>>,
+    quit_indicator: &mut UnboundedReceiver<()>,
+    mut init_client: Init,
+) -> Result<Option<DhcpV4Lease>, NipartError>
+where
+    C: DhcpV4ClientOps + Send,
+    Init: FnMut() -> InitFut,
+    InitFut: Future<Output = Result<C, NipartError>> + Send,
+{
+    loop {
+        tokio::select! {
+            result = client.run() => {
+                match result {
+                    Ok(DhcpV4State::Done(lease)) => {
+                        return Ok(Some(*lease));
+                    }
+                    Ok(dhcp_state) => {
+                        log::info!(
+                            "DHCPv4 on {}({}) reach {} state",
+                            base_iface.name,
+                            base_iface.iface_type,
+                            dhcp_state
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "DHCPv4 on {}({}) failed, restarting client: {e}",
+                            base_iface.name,
+                            base_iface.iface_type,
+                        );
+                        set_state(share_data, DhcpState::Running, base_iface)?;
+                        client.clean_up();
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(
+                                DHCPV4_RESTART_DELAY_MS,
+                            )) => {}
+                            _ = quit_indicator.next() => {
+                                log::info!(
+                                    "Stopped DHCPv4 on {}({}) after error",
+                                    base_iface.name,
+                                    base_iface.iface_type,
+                                );
+                                return Ok(None);
+                            }
+                        }
+                        match init_client().await {
+                            Ok(new_client) => *client = new_client,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+            _ = quit_indicator.next() => {
+                log::info!(
+                    "Stopped DHCPv4 on {}({})",
+                    base_iface.name,
+                    base_iface.iface_type,
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
 async fn dhcp_thread(
     mut dhcp_client: DhcpV4Client,
     base_iface: BaseInterface,
@@ -286,75 +457,40 @@ async fn dhcp_thread(
         base_iface.name,
         base_iface.iface_type
     );
-    match share_data.lock() {
-        Ok(mut share_data) => {
-            share_data.state = DhcpState::Running;
-        }
-        Err(e) => {
-            return Err(NipartError::new(
-                ErrorKind::Bug,
-                format!(
-                    "Failed to lock DHCPv4 {}({}) share data: {e}",
-                    base_iface.name, base_iface.iface_type,
-                ),
-            ));
-        }
-    }
-    let result = loop {
-        tokio::select! {
-            result = dhcp_client.run() => {
-                match result {
-                    Ok(DhcpV4State::Done(lease)) => {
-                        log::info!(
-                            "DHCPv4 on {}({}) got lease {}",
-                            base_iface.name,
-                            base_iface.iface_type,
-                            lease.yiaddr,
-                        );
-                        match share_data.lock() {
-                            Ok(mut share_data) => {
-                                share_data.state = DhcpState::Done;
-                            }
-                            Err(e) => {
-                                break Err::<(), NipartError>(NipartError::new(
-                                    ErrorKind::Bug,
-                                    format!("Unhandled DHCPv4 error: {e}"),
-                                ));
-                            }
-                        }
-                        if let Err(e) = apply_lease(
-                            &base_iface,
-                            &lease,
-                            share_data.clone(),
-                            msg_to_daemon.as_ref(),
-                        ).await {
-                            break Err(e);
-                        }
-                    }
-                    Ok(dhcp_state) => {
-                        log::info!(
-                            "DHCPv4 on {}({}) reach {} state",
-                            base_iface.name,
-                            base_iface.iface_type,
-                            dhcp_state
-                        );
-                    }
-                    Err(e) => {
-                        break Err(NipartError::new(
-                            ErrorKind::Bug,
-                            format!("Unhandled DHCPv4 error: {e}"),
-                        ));
-                    }
-                }
-            }
-            _ = quit_indicator.next() => {
+    set_state(&share_data, DhcpState::Running, &base_iface)?;
+    let result: Result<(), NipartError> = loop {
+        match next_dhcpv4_lease(
+            &mut dhcp_client,
+            &base_iface,
+            &share_data,
+            &mut quit_indicator,
+            || init_dhcpv4_client_for_retry(&base_iface),
+        )
+        .await
+        {
+            Ok(Some(lease)) => {
                 log::info!(
-                    "Stopped DHCPv4 on {}({})",
+                    "DHCPv4 on {}({}) got lease {}",
                     base_iface.name,
                     base_iface.iface_type,
+                    lease.yiaddr,
                 );
+                set_state(&share_data, DhcpState::Done, &base_iface)?;
+                if let Err(e) = apply_lease(
+                    &base_iface,
+                    &lease,
+                    share_data.clone(),
+                    msg_to_daemon.as_ref(),
+                )
+                .await
+                {
+                    break Err(e);
+                }
+            }
+            Ok(None) => {
                 return Ok(());
             }
+            Err(e) => break Err(e),
         }
     };
 
@@ -364,20 +500,7 @@ async fn dhcp_thread(
             base_iface.name,
             base_iface.iface_type,
         );
-        match share_data.lock() {
-            Ok(mut share_data) => {
-                share_data.state = DhcpState::Error(e.to_string());
-            }
-            Err(e) => {
-                return Err(NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "Failed to lock DHCPv4 {}({}) share data: {e}",
-                        base_iface.name, base_iface.iface_type,
-                    ),
-                ));
-            }
-        }
+        set_state(&share_data, DhcpState::Error(e.to_string()), &base_iface)?;
     }
     Ok(())
 }
