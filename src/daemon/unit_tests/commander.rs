@@ -3,9 +3,113 @@
 use nipart::{BaseInterface, InterfaceType, NetworkState, NipartInterface};
 
 use super::{
-    base_iface_for_dhcp_restore, gen_wifi_off_purge_state,
-    remove_manual_activation, remove_ready_state,
+    base_iface_for_dhcp_restore, gen_saved_route_reconcile_state,
+    gen_wifi_off_purge_state, remove_manual_activation, remove_ready_state,
 };
+
+#[test]
+fn test_gen_saved_route_reconcile_state_keeps_only_target_routes() {
+    let saved: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        routes:
+          config:
+            - destination: 203.0.113.0/24
+              next-hop-interface: eth0
+              next-hop-address: 192.0.2.1
+              metric: 103
+            - destination: 198.51.100.0/24
+              next-hop-interface: eth1
+              next-hop-address: 192.0.2.1
+              metric: 104
+        interfaces:
+          - name: eth0
+            type: ethernet
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+              auto-gateway: false
+          - name: eth1
+            type: ethernet
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+              auto-gateway: false
+        "#,
+    )
+    .unwrap();
+    let cur: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        interfaces:
+          - name: eth0
+            type: ethernet
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+              dhcp-state: done
+              address:
+                - ip: 192.0.2.100
+                  prefix-length: 24
+          - name: eth1
+            type: ethernet
+            state: up
+        "#,
+    )
+    .unwrap();
+
+    let ret = gen_saved_route_reconcile_state(&saved, &cur, "eth0");
+
+    assert_eq!(ret.ifaces.iter().count(), 1);
+    assert_eq!(ret.ifaces.iter().next().unwrap().name(), "eth0");
+    let routes = ret.routes.config.unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].destination.as_deref(), Some("203.0.113.0/24"));
+    assert_eq!(routes[0].next_hop_iface.as_deref(), Some("eth0"));
+}
+
+#[test]
+fn test_gen_saved_route_reconcile_state_matches_mac_identified_profile() {
+    let saved: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        routes:
+          config:
+            - destination: 203.0.113.0/24
+              next-hop-interface: lan0
+              next-hop-address: 192.0.2.1
+              metric: 103
+        interfaces:
+          - name: lan0
+            type: ethernet
+            identifier: mac-address
+            mac-address: 02:00:00:00:00:02
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+              auto-gateway: false
+        "#,
+    )
+    .unwrap();
+    let cur: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        interfaces:
+          - name: eth2
+            type: ethernet
+            state: up
+            mac-address: 02:00:00:00:00:02
+        "#,
+    )
+    .unwrap();
+
+    let ret = gen_saved_route_reconcile_state(&saved, &cur, "eth2");
+
+    assert_eq!(ret.ifaces.iter().next().unwrap().name(), "lan0");
+    let routes = ret.routes.config.unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].destination.as_deref(), Some("203.0.113.0/24"));
+}
 
 #[test]
 fn test_base_iface_for_dhcp_restore_inherits_config_only_ipv4() {

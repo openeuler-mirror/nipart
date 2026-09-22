@@ -363,7 +363,10 @@ fn gen_wifi_plugin_state(saved_state: &NetworkState) -> NetworkState {
     ret
 }
 
-fn is_route_matching_iface(rt: &RouteEntry, iface: &Interface) -> bool {
+pub(crate) fn is_route_matching_iface(
+    rt: &RouteEntry,
+    iface: &Interface,
+) -> bool {
     match rt.next_hop_iface.as_deref() {
         Some(name) if name == iface.kernel_iface_name() => true,
         Some(name)

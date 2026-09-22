@@ -580,6 +580,7 @@ async fn apply_lease(
 
     let apply_opt = NipartApplyOption::new().memory_only().no_verify();
     NipartNoDaemon::apply_network_state(net_state, apply_opt).await?;
+    notify_daemon_on_lease_applied(base_iface, msg_to_daemon);
     notify_daemon_on_gateway_change(
         base_iface,
         gateway_before,
@@ -587,6 +588,38 @@ async fn apply_lease(
         msg_to_daemon,
     );
     Ok(())
+}
+
+/// Tell the daemon that a lease was applied so it can restore the saved
+/// static routes of this interface.
+///
+/// Applying a lease can be accompanied by the kernel removing the previous
+/// address and its dependent routes.  The lease apply above only owns the
+/// DHCP address and DHCP-derived routes, hence the daemon has to reconcile
+/// the saved routes afterwards.
+///
+/// A failure to notify is logged only: the address is already applied and a
+/// later lease or link event can retry the route reconciliation.
+fn notify_daemon_on_lease_applied(
+    base_iface: &BaseInterface,
+    msg_to_daemon: Option<&UnboundedSender<NipartManagerCmd>>,
+) {
+    let Some(msg_to_daemon) = msg_to_daemon else {
+        return;
+    };
+    if msg_to_daemon
+        .unbounded_send(NipartManagerCmd::DhcpV4LeaseApplied(
+            base_iface.name.clone(),
+        ))
+        .is_err()
+    {
+        log::debug!(
+            "Failed to notify the daemon about the DHCPv4 lease apply on \
+             {}({})",
+            base_iface.name,
+            base_iface.iface_type,
+        );
+    }
 }
 
 /// Tell the daemon when this lease changed the default gateway.

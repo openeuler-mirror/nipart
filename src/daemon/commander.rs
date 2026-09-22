@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures_channel::mpsc::UnboundedSender;
 use nipart::{
@@ -15,7 +15,7 @@ use super::{
     daemon::NipartManagerCmd,
     dhcp::{NipartDhcpV4Manager, NipartDhcpV6Manager},
     dns::NipartDnsManager,
-    event::NipartEventManager,
+    event::{NipartEventManager, is_route_matching_iface},
     monitor::NipartMonitorManager,
     plugin::NipartPluginManager,
     udev::udev_net_device_is_initialized,
@@ -522,6 +522,95 @@ impl NipartCommander {
         }
         Ok(())
     }
+
+    /// Re-apply the saved routes of a DHCPv4 interface after its lease was
+    /// applied by the DHCP worker.
+    ///
+    /// When a DHCP address expires, the kernel removes the connected route
+    /// of its prefix and every route whose next hop belongs to that prefix,
+    /// even when the route has the `onlink` flag.  The DHCP worker then
+    /// installs the new address, but it has no knowledge of the saved
+    /// static routes, so without this reconciliation the routes stay missing
+    /// until an unrelated link event or apply restores them.
+    pub(crate) async fn reconcile_saved_routes_for_dhcpv4_iface(
+        &mut self,
+        kernel_iface_name: &str,
+    ) -> Result<(), NipartError> {
+        let saved_state = self.conf_manager.query_state().await?;
+        let cur_state =
+            NipartNoDaemon::query_network_state(NipartQueryOption::running())
+                .await?;
+        let desired_state = gen_saved_route_reconcile_state(
+            &saved_state,
+            &cur_state,
+            kernel_iface_name,
+        );
+        if desired_state
+            .routes
+            .config
+            .as_ref()
+            .is_none_or(|routes| routes.is_empty())
+        {
+            return Ok(());
+        }
+        log::debug!(
+            "Re-applying saved routes for interface {kernel_iface_name} after \
+             DHCPv4 lease change: {desired_state}"
+        );
+        NipartNoDaemon::apply_network_state(
+            desired_state,
+            NipartApplyOption::new().memory_only().no_verify(),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Build the state needed to restore the saved routes of a DHCPv4 kernel
+/// interface.
+///
+/// The matching saved interface is included so the merged route state can
+/// resolve profile names and set the `onlink` flag for DHCP interfaces.
+/// Routes of other interfaces are deliberately left out: this apply only
+/// repairs what the DHCP worker may have lost.
+fn gen_saved_route_reconcile_state(
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+    kernel_iface_name: &str,
+) -> NetworkState {
+    let mut ret = NetworkState::default();
+    let mut added_ifaces: HashSet<String> = HashSet::new();
+    for saved_iface in saved_state.ifaces.iter() {
+        let Some(cur_iface) =
+            match_kernel_iface_for_saved_iface(saved_iface, cur_state)
+        else {
+            continue;
+        };
+        if cur_iface.kernel_iface_name() != kernel_iface_name {
+            continue;
+        }
+        let mut has_route = false;
+        if let Some(saved_routes) = saved_state.routes.config.as_ref() {
+            for route in saved_routes
+                .iter()
+                .filter(|route| is_route_matching_iface(route, saved_iface))
+            {
+                ret.routes
+                    .config
+                    .get_or_insert_default()
+                    .push(route.clone());
+                has_route = true;
+            }
+        }
+        if has_route && added_ifaces.insert(saved_iface.name().to_string()) {
+            ret.ifaces.push(saved_iface.clone());
+        }
+    }
+    if let Some(routes) = ret.routes.config.as_mut() {
+        routes.sort_unstable();
+        routes.dedup();
+    }
+    ret
 }
 
 /// Build the base interface used to start the DHCPv4 client after a daemon

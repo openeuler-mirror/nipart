@@ -88,6 +88,10 @@ def _has_gateway_route():
     return False
 
 
+def _has_static_route():
+    return STATIC_ROUTE_DST in _get_routes()
+
+
 def _gateway_route_metric():
     for line in _get_routes().splitlines():
         fields = line.split()
@@ -152,6 +156,42 @@ def test_dhcpv4_auto_gateway_false(dhcp_env, dhcp_cli_cleanup):
     assert retry_till_true_or_timeout(DEFAULT_TIMEOUT, _ping_dhcp_server)
     assert not _has_gateway_route()
     assert STATIC_ROUTE_DST in _get_routes()
+
+
+def test_dhcpv4_static_route_restored_after_lease_renewal(
+    dhcp_env, dhcp_cli_cleanup
+):
+    stop_dhcp_server()
+    start_dhcp_server(TEST_NET_NS, renewal_time=5, rebinding_time=10)
+    try:
+        nipart.apply(load_yaml(f"""---
+            interfaces:
+            - name: {DHCP_CLI_NIC}
+              type: ethernet
+              state: up
+              ipv4:
+                enabled: true
+                dhcp: true
+                auto-gateway: false
+            routes:
+              config:
+              - destination: {STATIC_ROUTE_DST}
+                next-hop-interface: {DHCP_CLI_NIC}
+                next-hop-address: {DHCP_SRV_IP4}"""))
+        assert retry_till_true_or_timeout(DEFAULT_TIMEOUT, _has_dhcp_addr)
+        assert retry_till_true_or_timeout(DEFAULT_TIMEOUT, _has_static_route)
+
+        # Simulate the kernel dropping a route whose next hop becomes
+        # unreachable, for example when the DHCP address expires.
+        exec_cmd(["ip", "route", "del", STATIC_ROUTE_DST])
+        assert not _has_static_route()
+
+        # The short renewal timer makes the DHCP worker apply the lease
+        # again shortly; the daemon must re-add the saved static route.
+        assert retry_till_true_or_timeout(30, _has_static_route)
+    finally:
+        stop_dhcp_server()
+        start_dhcp_server(TEST_NET_NS)
 
 
 def test_dhcpv4_auto_gateway_true(dhcp_env, dhcp_cli_cleanup):
