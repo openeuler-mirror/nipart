@@ -145,10 +145,7 @@ impl NipartDnsServerConfig {
 
 /// Nameserver string accepted by mudz: plain IP, `IP:port` or DoH URL.
 fn upstream_server_string(server: &DnsUpstreamServer) -> String {
-    match server {
-        DnsUpstreamServer::Ip(addr) => addr.to_string(),
-        DnsUpstreamServer::Doh(url) => url.clone(),
-    }
+    server.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +165,7 @@ impl DnsUpstreamConfig {
         auto_dns_servers
             .iter()
             .copied()
-            .map(|ip| DnsUpstreamServer::Ip(SocketAddr::new(ip, 53)))
+            .map(DnsUpstreamServer::from_ip)
             .chain(self.static_servers.iter().cloned())
             .collect()
     }
@@ -225,8 +222,8 @@ mod tests {
         assert_eq!(
             config.fallback.servers(&config.auto_dns_servers),
             vec![
-                DnsUpstreamServer::Ip("198.51.100.53:53".parse().unwrap()),
-                DnsUpstreamServer::Ip("192.0.2.53:53".parse().unwrap()),
+                DnsUpstreamServer::from_ip("198.51.100.53".parse().unwrap()),
+                DnsUpstreamServer::from_ip("192.0.2.53".parse().unwrap()),
             ]
         );
     }
@@ -241,6 +238,34 @@ mod tests {
         )
         .unwrap();
         assert!(config.fallback.servers(&config.auto_dns_servers).is_empty());
+    }
+
+    /// A port written in the configuration pins every mudz attempt,
+    /// including the DoT probe, while a bare address is handed over
+    /// without a port so mudz can probe DoT on 853.
+    #[test]
+    fn test_nameserver_port_preserved_for_mudz() {
+        let mut cache = DnsCacheConfig::default();
+        let mut home = nipart::NipartDnsUpstreamGroup::default();
+        home.name = "home".to_string();
+        home.nameservers = vec![
+            "192.0.2.53".to_string(),
+            "192.0.2.54:5353".to_string(),
+            "2001:db8::53".to_string(),
+        ];
+        cache.groups = vec![home];
+
+        let config = NipartDnsServerConfig::new(&cache, &[]).unwrap();
+        let mudz_config = config.mudz_config();
+
+        assert_eq!(
+            mudz_config.groups.get("home").unwrap().nameservers,
+            vec![
+                "192.0.2.53".to_string(),
+                "192.0.2.54:5353".to_string(),
+                "2001:db8::53".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -258,7 +283,7 @@ mod tests {
             vec!["192.0.2.53".parse().unwrap()];
         let mut home = nipart::NipartDnsUpstreamGroup::default();
         home.name = "home".to_string();
-        home.domains = vec!["Sweat.Home".to_string()];
+        home.domains = vec!["Sweat.Example.Org".to_string()];
         home.nameservers = vec!["192.0.2.1".to_string()];
         home.disable_ipv6 = true;
         let mut blocked = nipart::NipartDnsUpstreamGroup::default();
@@ -280,7 +305,9 @@ mod tests {
         assert_eq!(
             mudz_config.fallback.nameservers,
             vec![
-                "198.51.100.53:53".to_string(),
+                // Implicit port: mudz probes DoT on 853 and falls back to
+                // plaintext on 53.
+                "198.51.100.53".to_string(),
                 "https://dns.example.org/dns-query".to_string(),
             ]
         );
@@ -291,8 +318,8 @@ mod tests {
         );
 
         let home = mudz_config.groups.get("home").unwrap();
-        assert_eq!(home.nameservers, vec!["192.0.2.1:53".to_string()]);
-        assert_eq!(home.domains, vec!["sweat.home".to_string()]);
+        assert_eq!(home.nameservers, vec!["192.0.2.1".to_string()]);
+        assert_eq!(home.domains, vec!["sweat.example.org".to_string()]);
         assert!(home.disable_ipv6);
         // A group without nameservers means "reply NXDOMAIN" in mudz too.
         assert!(

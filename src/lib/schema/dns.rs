@@ -53,7 +53,7 @@ const DNS_OPTS_WITH_VALUE: [&str; 3] = ["ndots", "timeout", "attempts"];
 ///     groups:
 ///       - name: home
 ///         domains:
-///           - sweat.home
+///           - sweat.example.org
 ///         nameservers:
 ///           - 192.0.2.1
 /// ```
@@ -469,28 +469,51 @@ impl NipartDnsUpstreamGroup {
     }
 }
 
-/// A parsed upstream nameserver: plain IP address (with an optional port,
-/// default to 53) or DNS-over-HTTPS URL.
+/// A parsed upstream nameserver: a plain IP address (with an optional port)
+/// or a DNS-over-HTTPS URL.
 ///
 /// Accepted forms of the plain IP upstream:
-///  * `192.0.2.53` (port defaults to 53)
-///  * `192.0.2.53:5353`
-///  * `2001:db8::53` (port defaults to 53)
-///  * `[2001:db8::53]:5353`
+///  * `192.0.2.53` (plaintext on 53, opportunistic DoT probe on 853)
+///  * `192.0.2.53:5353` (port pinned for every attempt, DoT included)
+///  * `2001:db8::53` (plaintext on 53, opportunistic DoT probe on 853)
+///  * `[2001:db8::53]:5353` (port pinned for every attempt, DoT included)
 ///  * `[fe80::1%2]:53` (IPv6 with numeric scope id)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsUpstreamServer {
-    Ip(SocketAddr),
+    /// Plain DNS nameserver.
+    ///
+    /// `addr` is the plaintext endpoint: port 53 when the configuration
+    /// wrote no port. `port_explicit` records whether that port was written
+    /// in the configuration. `mudz` pins every attempt, including the
+    /// opportunistic DNS-over-TLS probe, to an explicit port, so an
+    /// implicit port must be handed over as a bare address to keep the
+    /// probe on 853.
+    Ip {
+        addr: SocketAddr,
+        port_explicit: bool,
+    },
     Doh(String),
 }
 
 impl DnsUpstreamServer {
+    /// A nameserver without an explicit port: plaintext queries use 53 and
+    /// DNS over TLS is probed on 853.
+    pub fn from_ip(ip: IpAddr) -> Self {
+        Self::Ip {
+            addr: SocketAddr::new(ip, 53),
+            port_explicit: false,
+        }
+    }
+
     pub fn parse(srv: &str) -> Result<Self, NipartError> {
         if let Some(url) = doh_url(srv) {
             return Ok(Self::Doh(url));
         }
         if let Ok(addr) = srv.parse::<SocketAddr>() {
-            return Ok(Self::Ip(addr));
+            return Ok(Self::Ip {
+                addr,
+                port_explicit: true,
+            });
         }
         // An interface name instead of the numeric scope id cannot be
         // used to open a socket: reject it instead of silently dropping
@@ -507,11 +530,29 @@ impl DnsUpstreamServer {
         }
         // Plain IP address without a port.
         let ip = parse_dns_server(srv)?;
-        Ok(Self::Ip(SocketAddr::new(ip, 53)))
+        Ok(Self::from_ip(ip))
     }
 
     pub fn is_doh(&self) -> bool {
         matches!(self, Self::Doh(_))
+    }
+}
+
+impl std::fmt::Display for DnsUpstreamServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ip {
+                addr,
+                port_explicit: true,
+            } => write!(f, "{addr}"),
+            // Dropping the implicit port lets mudz probe DNS over TLS on
+            // 853 before falling back to plaintext on 53.
+            Self::Ip {
+                addr,
+                port_explicit: false,
+            } => write!(f, "{}", addr.ip()),
+            Self::Doh(url) => write!(f, "{url}"),
+        }
     }
 }
 

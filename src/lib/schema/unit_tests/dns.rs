@@ -691,23 +691,32 @@ fn test_dns_resolver_gen_diff_only_keeps_explicit_properties() {
 fn test_dns_upstream_server_parse() {
     assert_eq!(
         DnsUpstreamServer::parse("192.0.2.53").unwrap(),
-        DnsUpstreamServer::Ip("192.0.2.53:53".parse().unwrap())
+        DnsUpstreamServer::from_ip("192.0.2.53".parse().unwrap())
     );
     assert_eq!(
         DnsUpstreamServer::parse("192.0.2.53:5353").unwrap(),
-        DnsUpstreamServer::Ip("192.0.2.53:5353".parse().unwrap())
+        DnsUpstreamServer::Ip {
+            addr: "192.0.2.53:5353".parse().unwrap(),
+            port_explicit: true,
+        }
     );
     assert_eq!(
         DnsUpstreamServer::parse("2001:db8::53").unwrap(),
-        DnsUpstreamServer::Ip("[2001:db8::53]:53".parse().unwrap())
+        DnsUpstreamServer::from_ip("2001:db8::53".parse().unwrap())
     );
     assert_eq!(
         DnsUpstreamServer::parse("[2001:db8::53]:5353").unwrap(),
-        DnsUpstreamServer::Ip("[2001:db8::53]:5353".parse().unwrap())
+        DnsUpstreamServer::Ip {
+            addr: "[2001:db8::53]:5353".parse().unwrap(),
+            port_explicit: true,
+        }
     );
     assert_eq!(
         DnsUpstreamServer::parse("[fe80::1%2]:53").unwrap(),
-        DnsUpstreamServer::Ip("[fe80::1%2]:53".parse().unwrap())
+        DnsUpstreamServer::Ip {
+            addr: "[fe80::1%2]:53".parse().unwrap(),
+            port_explicit: true,
+        }
     );
     assert_eq!(
         DnsUpstreamServer::parse("https://dns.example.org/dns-query").unwrap(),
@@ -724,6 +733,30 @@ fn test_dns_upstream_server_parse() {
     // Interface name cannot be used as socket scope.
     assert!(DnsUpstreamServer::parse("fe80::1%eth1").is_err());
     assert!(DnsUpstreamServer::parse("[fe80::1%eth1]:53").is_err());
+}
+
+/// The string handed to mudz must keep an explicitly configured port and
+/// drop an implicit one: mudz treats any port it is given as pinned, which
+/// would send the opportunistic DoT probe to 53 instead of 853.
+#[test]
+fn test_dns_upstream_server_upstream_string() {
+    for (input, expected) in [
+        ("192.0.2.53", "192.0.2.53"),
+        ("2001:db8::53", "2001:db8::53"),
+        ("192.0.2.53:5353", "192.0.2.53:5353"),
+        ("[2001:db8::53]:5353", "[2001:db8::53]:5353"),
+        ("[fe80::1%2]:53", "[fe80::1%2]:53"),
+        (
+            "https://dns.example.org/dns-query",
+            "https://dns.example.org/dns-query",
+        ),
+    ] {
+        assert_eq!(
+            DnsUpstreamServer::parse(input).unwrap().to_string(),
+            expected,
+            "upstream string for {input}"
+        );
+    }
 }
 
 #[test]
