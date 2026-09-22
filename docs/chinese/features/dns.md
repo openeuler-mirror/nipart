@@ -53,8 +53,9 @@ IPv6-RA 学习到的动态 DNS 配置的组合。
 缓存 DNS 的 YAML 示例：
  1. 使用 `dns.alidns.com` 和 `doh.pub` 的 DoH 作为回退 DNS 上游名称服务器。
  2. 使用 `223.5.5.5` 和 `119.29.29.29` 解析 `dns.alidns.com` 和 `doh.pub`。
- 3. 使用 `172.17.2.1` 解析 `sweat.home` 域。
- 4. 使用 `10.0.0.254` 和 `10.0.1.254` 解析 `rick.corp` 域。
+ 3. 使用 `192.0.2.1` 解析 `sweat.example.org` 域。
+ 4. 使用 `198.51.100.254` 和 `198.51.100.253` 解析 `rich.example.org`
+    域。
  5. 域匹配采用最长前缀匹配。
 
 ```yaml
@@ -95,16 +96,16 @@ dns-resolver:
     groups:
       - name: home
         domains:
-          - sweat.home
-          - 2.17.172.in-addr.arpa
+          - sweat.example.org
+          - 2.0.192.in-addr.arpa
         nameservers:
-          - 172.17.2.1
+          - 192.0.2.1
       - name: corp
         disable-ipv6: true
         domains:
-          - rich.corp
-          - 0.10.in-addr.arpa
+          - rich.example.org
+          - 0.51.100.in-addr.arpa
         nameservers:
-          - 10.0.0.254
-          - 10.0.1.254
+          - 198.51.100.254
+          - 198.51.100.253
 ```
