@@ -17,17 +17,25 @@ DNSMASQ_PID_PATH = "/tmp/nipart_test_dnsmasq.pid"
 DHCP_SRV_NIC = "dhcp_srv"
 
 
-def start_dhcp_server(net_ns):
+def start_dhcp_server(
+    net_ns, lease_time="48h", renewal_time=None, rebinding_time=None
+):
     exec_cmd(
         f"ip netns exec {net_ns} "
-        f"ip addr add {DHCP_SRV_IP4}/24 dev {DHCP_SRV_NIC}".split()
+        f"ip addr replace {DHCP_SRV_IP4}/24 dev {DHCP_SRV_NIC}".split()
     )
+    extra_options = ""
+    if renewal_time is not None:
+        extra_options += f"dhcp-option-force=58,{renewal_time}\n"
+    if rebinding_time is not None:
+        extra_options += f"dhcp-option-force=59,{rebinding_time}\n"
     dnsmasq_conf = """
     leasefile-ro
     interface={iface}
-    dhcp-range={ipv4_prefix}.200,{ipv4_prefix}.250,255.255.255.0,48h
+    dhcp-range={ipv4_prefix}.200,{ipv4_prefix}.250,255.255.255.0,{lease_time}
     dhcp-option=option:classless-static-route,{classless_rt},{classless_rt_dst}
     dhcp-option=option:dns-server,{v4_dns_server}
+    {extra_options}
     """.format(
         **{
             "iface": DHCP_SRV_NIC,
@@ -35,6 +43,8 @@ def start_dhcp_server(net_ns):
             "classless_rt": IPV4_CLASSLESS_ROUTE_DST_NET1,
             "classless_rt_dst": IPV4_CLASSLESS_ROUTE_NEXT_HOP1,
             "v4_dns_server": DHCP_SRV_IP4,
+            "lease_time": lease_time,
+            "extra_options": extra_options,
         }
     )
     with open(DNSMASQ_CONF_PATH, "w") as fd:

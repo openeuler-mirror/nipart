@@ -336,6 +336,27 @@ fn test_lease_gateway_change_notifies_daemon() {
 }
 
 #[test]
+fn test_lease_apply_notifies_daemon_for_saved_route_reconcile() {
+    let base_iface = base_iface_with_auto_route_metric(None);
+    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+
+    notify_daemon_on_lease_applied(&base_iface, Some(&sender));
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(NipartManagerCmd::DhcpV4LeaseApplied(iface_name))
+            if iface_name == base_iface.name
+    ));
+}
+
+#[test]
+fn test_lease_apply_without_daemon_sender_is_ignored() {
+    let base_iface = base_iface_with_auto_route_metric(None);
+
+    notify_daemon_on_lease_applied(&base_iface, None);
+}
+
+#[test]
 fn test_same_lease_gateway_does_not_notify_daemon() {
     // A renewal of the same lease (same gateway, metric and table) must not
     // reset the upstream transports of the DNS cache.

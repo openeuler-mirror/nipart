@@ -33,6 +33,10 @@ pub(crate) enum NipartManagerCmd {
     /// notified so the upstream groups which failed on the old network
     /// path are retried at once.
     GatewayChanged,
+    /// A DHCPv4 lease was applied to the kernel interface, which may have
+    /// removed kernel routes as a side effect of an expired address. The
+    /// daemon re-applies the saved routes of this interface.
+    DhcpV4LeaseApplied(String),
 }
 
 #[derive(Debug)]
@@ -268,6 +272,18 @@ impl NipartDaemon {
             }
             NipartManagerCmd::GatewayChanged => {
                 self.handle_gateway_changed().await;
+            }
+            NipartManagerCmd::DhcpV4LeaseApplied(iface_name) => {
+                if let Err(e) = self
+                    .commander
+                    .reconcile_saved_routes_for_dhcpv4_iface(&iface_name)
+                    .await
+                {
+                    log::warn!(
+                        "Failed to re-apply saved routes for interface \
+                         {iface_name} after DHCPv4 lease: {e}"
+                    );
+                }
             }
         }
     }

@@ -5,5 +5,8 @@ mod event_worker;
 
 pub(crate) use self::{
     event_manager::NipartEventManager,
-    event_worker::{NipartEventCmd, NipartEventReply, NipartEventWorker},
+    event_worker::{
+        NipartEventCmd, NipartEventReply, NipartEventWorker,
+        is_route_matching_iface,
+    },
 };
