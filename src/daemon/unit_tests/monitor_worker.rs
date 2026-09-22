@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -15,11 +15,11 @@ use rtnetlink::{
 };
 
 use super::{
-    LastLinkEvent, NipartMonitorCmd, NipartMonitorWorker,
-    event_is_explicitly_down, format_mac, iface_identity_names,
-    should_ignore_wireless_notification,
+    EVENT_EXPIRE_TIME_SEC, LastLinkEvent, NipartMonitorCmd,
+    NipartMonitorWorker, event_is_explicitly_down, format_mac,
+    iface_identity_names, should_ignore_wireless_notification,
 };
-use crate::task::TaskWorker;
+use crate::{daemon::NipartManagerCmd, task::TaskWorker};
 
 fn gen_event(iface_name: &str) -> InterfaceLinkEvent {
     InterfaceLinkEvent::new(
@@ -42,8 +42,23 @@ fn gen_worker() -> NipartMonitorWorker {
 fn gen_last_state(is_up: bool) -> LastLinkEvent {
     LastLinkEvent {
         is_up,
-        extra_info: String::new(),
+        iface_index: 10,
+        iface_type: InterfaceType::Ethernet,
+        extra_info: None,
+        mac_address: None,
         time_stamp: SystemTime::now(),
+    }
+}
+
+fn gen_expired_last_state(is_up: bool) -> LastLinkEvent {
+    LastLinkEvent {
+        is_up,
+        iface_index: 10,
+        iface_type: InterfaceType::Ethernet,
+        extra_info: None,
+        mac_address: None,
+        time_stamp: SystemTime::now()
+            - Duration::from_secs(EVENT_EXPIRE_TIME_SEC * 2),
     }
 }
 
@@ -233,7 +248,7 @@ fn test_notify_marks_new_wifi_phy_only_once() {
     rt.block_on(worker.notify(event.clone())).unwrap();
     assert!(worker.wifi_phys_emited.contains("wlan0"));
     assert!(worker.emited["wlan0"].is_up);
-    assert!(worker.emited["wlan0"].extra_info.is_empty());
+    assert!(worker.emited["wlan0"].extra_info.is_none());
 
     // A later event for the same phy is a normal link event.
     event.is_up = false;
@@ -273,6 +288,185 @@ fn test_try_notify_dedups_duplicate_up_events() {
     rt.block_on(worker.try_notify(gen_event("enp1s0"))).unwrap();
     assert!(worker.emited["enp1s0"].is_up);
     assert!(!worker.delay_queue.contains_key("enp1s0"));
+}
+
+#[test]
+fn test_pause_stores_last_link_state_snapshot() {
+    let mut worker = gen_worker();
+    worker.iface_monitor_list.insert("enp1s0".to_string());
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_last_state(true));
+
+    worker.pause();
+    assert!(worker.paused_state.as_ref().unwrap()["enp1s0"].is_up);
+
+    // A nested pause must keep the state captured before the netlink
+    // session was dropped.
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_last_state(false));
+    worker.pause();
+    assert!(worker.paused_state.as_ref().unwrap()["enp1s0"].is_up);
+}
+
+#[test]
+fn test_emit_on_resume_only_for_changed_links() {
+    let mut worker = gen_worker();
+    worker.iface_monitor_list.insert("enp1s0".to_string());
+    worker.paused_state = Some(HashMap::from([(
+        "enp1s0".to_string(),
+        gen_last_state(true),
+    )]));
+
+    // The link did not change while the monitor was paused.
+    assert!(!worker.emit_on_resume(&gen_event("enp1s0")));
+
+    // The link went down while the monitor was paused.
+    let down_event = InterfaceLinkEvent::new(
+        "enp1s0".to_string(),
+        10,
+        InterfaceType::Ethernet,
+        false,
+        None,
+    );
+    assert!(worker.emit_on_resume(&down_event));
+
+    // An interface unknown at pause time is emitted.
+    assert!(worker.emit_on_resume(&gen_event("enp2s0")));
+
+    // No pause snapshot (first link dump after start): emit.
+    worker.paused_state = None;
+    assert!(worker.emit_on_resume(&gen_event("enp1s0")));
+}
+
+#[test]
+fn test_resume_event_diffs_against_pause_snapshot() {
+    let mut worker = gen_worker();
+    let (tx, mut rx) = unbounded();
+    worker.msg_to_commander = Some(tx);
+    worker.iface_monitor_list.insert("enp1s0".to_string());
+    // The link has been up longer than the event expiry time: without the
+    // pause snapshot comparison, the resume link dump would re-emit it.
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_expired_last_state(true));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    worker.pause();
+
+    // Still up: unchanged during the pause, no event is emitted.
+    rt.block_on(worker.handle_resume_event(gen_event("enp1s0")))
+        .unwrap();
+    assert!(rx.try_recv().is_err());
+
+    // Went down during the pause: emitted.
+    let down_event = InterfaceLinkEvent::new(
+        "enp1s0".to_string(),
+        10,
+        InterfaceType::Ethernet,
+        false,
+        None,
+    );
+    rt.block_on(worker.handle_resume_event(down_event)).unwrap();
+    assert!(rx.try_recv().is_ok());
+}
+
+#[test]
+fn test_resume_emits_delete_for_iface_removed_while_paused() {
+    let mut worker = gen_worker();
+    let (tx, mut rx) = unbounded();
+    worker.msg_to_commander = Some(tx);
+    worker.iface_monitor_list.insert("enp1s0".to_string());
+    // enp2s0 is tracked only by MAC watch.
+    worker
+        .mac_watch_list
+        .insert("02:00:00:00:00:02".to_string());
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_last_state(true));
+    worker.emited.insert(
+        "enp2s0".to_string(),
+        LastLinkEvent {
+            is_up: true,
+            iface_index: 11,
+            iface_type: InterfaceType::Ethernet,
+            extra_info: None,
+            mac_address: Some("02:00:00:00:00:02".to_string()),
+            time_stamp: SystemTime::now(),
+        },
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    worker.pause();
+
+    // enp1s0 is still in the resume link dump, enp2s0 disappeared.
+    let seen_ifaces = HashSet::from(["enp1s0".to_string()]);
+    rt.block_on(worker.handle_resume_deleted_ifaces(&seen_ifaces))
+        .unwrap();
+
+    let NipartManagerCmd::LinkEvent(event) = rx.try_recv().unwrap() else {
+        panic!("Expected a link event");
+    };
+    assert!(event.is_delete);
+    assert_eq!(event.iface_name, "enp2s0");
+    assert_eq!(event.iface_index, 11);
+    assert_eq!(event.iface_type, InterfaceType::Ethernet);
+    assert!(rx.try_recv().is_err());
+
+    // The delete cleaned the state of the gone interface; the interface
+    // which is still present keeps its state.
+    assert!(!worker.emited.contains_key("enp2s0"));
+    assert!(worker.emited.contains_key("enp1s0"));
+    // The pause snapshot was consumed by the reconciliation.
+    assert!(worker.paused_state.is_none());
+}
+
+#[test]
+fn test_emit_on_resume_wifi_ssid_change() {
+    let mut worker = gen_worker();
+    worker.wifi_monitor_enabled = true;
+    worker.paused_state = Some(HashMap::from([(
+        "wlan0".to_string(),
+        LastLinkEvent {
+            is_up: true,
+            iface_index: 10,
+            iface_type: InterfaceType::WifiPhy,
+            extra_info: Some("Test-WIFI-A".to_string()),
+            mac_address: None,
+            time_stamp: SystemTime::now(),
+        },
+    )]));
+
+    // A link dump carries no SSID and cannot prove the SSID changed.
+    let no_ssid_event = InterfaceLinkEvent::new(
+        "wlan0".to_string(),
+        10,
+        InterfaceType::WifiPhy,
+        true,
+        None,
+    );
+    assert!(!worker.emit_on_resume(&no_ssid_event));
+
+    // Same SSID: unchanged.
+    let same_ssid_event = InterfaceLinkEvent::new(
+        "wlan0".to_string(),
+        10,
+        InterfaceType::WifiPhy,
+        true,
+        Some("Test-WIFI-A".to_string()),
+    );
+    assert!(!worker.emit_on_resume(&same_ssid_event));
+
+    // A new SSID is a state change even when the link never went down.
+    let new_ssid_event = InterfaceLinkEvent::new(
+        "wlan0".to_string(),
+        10,
+        InterfaceType::WifiPhy,
+        true,
+        Some("Test-WIFI-B".to_string()),
+    );
+    assert!(worker.emit_on_resume(&new_ssid_event));
 }
 
 #[test]

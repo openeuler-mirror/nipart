@@ -10,7 +10,7 @@ use futures_channel::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot::Sender,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use nipart::{
     ErrorKind, Interface, InterfaceLinkEvent, InterfaceType, NipartError,
     NipartInterface,
@@ -42,34 +42,83 @@ const DELAY_TICK_SEC_IF_BUSY: u64 = 1;
 // Duration::MAX which will cause overflow on Interval::reset_after()
 const DELAY_TICK_SEC_IF_FREE: u64 = 24 * 60 * 60;
 
-/// Compact last link state kept for deduplication.
+/// Compact last link state kept for pause/resume reconciliation and
+/// duplicate event deduplication.
 ///
-/// Unlike the full netlink event, this survives monitor pause/resume so a
-/// fresh link dump can distinguish a real down->up transition from a
-/// duplicate up event of an interface that never went down.
+/// Unlike the full netlink event, this survives the netlink session being
+/// dropped on monitor pause, so the next link dump can distinguish a real
+/// state change from a duplicate event of an interface that did not change.
 #[derive(Debug, Clone)]
 struct LastLinkEvent {
     is_up: bool,
-    /// SSID for wifi-phy events that carried one, empty otherwise.
+    iface_index: u32,
+    iface_type: InterfaceType,
+    /// SSID of a wifi-phy association event; `None` when the netlink
+    /// message carried no association IEs (e.g. a link dump) or the
+    /// interface is not a wifi-phy.
     /// Future: link-local address when DHCPv6 must restart after the
     /// address changes.
-    #[allow(dead_code)]
-    extra_info: String,
+    extra_info: Option<String>,
+    /// MAC observed for the interface.  Kept so a delete event synthesized
+    /// for an interface which disappeared while the monitor was paused can
+    /// still match `mac_watch_list`.
+    mac_address: Option<String>,
     time_stamp: SystemTime,
 }
 
 impl LastLinkEvent {
-    fn from_event(event: &InterfaceLinkEvent) -> Self {
-        let extra_info = if event.iface_type == InterfaceType::WifiPhy {
-            event.ssid.clone().unwrap_or_default()
-        } else {
-            String::new()
-        };
+    fn from_event(
+        event: &InterfaceLinkEvent,
+        mac_address: Option<String>,
+    ) -> Self {
         Self {
             is_up: event.is_up,
-            extra_info,
+            iface_index: event.iface_index,
+            iface_type: event.iface_type.clone(),
+            extra_info: event_extra_info(event),
+            mac_address,
             time_stamp: event.time_stamp,
         }
+    }
+
+    /// Whether `event` reports the same link state as this event.
+    ///
+    /// A wifi-phy event without SSID (e.g. the link dump after a monitor
+    /// resume) cannot tell whether the SSID changed, so it counts as
+    /// unchanged.  An association event carrying a different SSID is a
+    /// change even though the link never went down.
+    fn is_same_state(&self, event: &InterfaceLinkEvent) -> bool {
+        if self.is_up != event.is_up {
+            return false;
+        }
+        match event_extra_info(event) {
+            None => true,
+            Some(extra_info) => {
+                self.extra_info.as_deref() == Some(extra_info.as_str())
+            }
+        }
+    }
+
+    /// Build the delete event for an interface which disappeared while the
+    /// monitor was paused.
+    fn to_delete_event(&self, iface_name: &str) -> InterfaceLinkEvent {
+        let mut event = InterfaceLinkEvent::new(
+            iface_name.to_string(),
+            self.iface_index,
+            self.iface_type.clone(),
+            false,
+            self.extra_info.clone(),
+        );
+        event.is_delete = true;
+        event
+    }
+}
+
+fn event_extra_info(event: &InterfaceLinkEvent) -> Option<String> {
+    if event.iface_type == InterfaceType::WifiPhy {
+        event.ssid.clone()
+    } else {
+        None
     }
 }
 
@@ -186,6 +235,12 @@ pub(crate) struct NipartMonitorWorker {
     /// the event worker cannot re-apply the saved config and its routes.
     explicitly_down: HashSet<String>,
     emited: HashMap<String, LastLinkEvent>,
+    /// Link state captured when the monitor paused, keyed by kernel
+    /// interface name.  The link dump of the next `resume()` reconciles
+    /// against this snapshot: only interfaces whose state changed while
+    /// the monitor was paused are emitted.  `None` means no pause has
+    /// been captured yet.
+    paused_state: Option<HashMap<String, LastLinkEvent>>,
     /// Wifi-phys whose first event has already been sent to the event
     /// worker. Kept across pause/resume so an existing phy is not announced
     /// as new after every apply; removed on interface delete so a later
@@ -213,6 +268,7 @@ impl TaskWorker for NipartMonitorWorker {
             msg_to_commander: None,
             explicitly_down: HashSet::new(),
             emited: HashMap::new(),
+            paused_state: None,
             wifi_phys_emited: HashSet::new(),
             delay_queue: HashMap::new(),
         })
@@ -379,7 +435,94 @@ impl NipartMonitorWorker {
         self.manual_pause_count == 0 && self.netlink_handle.is_none()
     }
 
+    /// Whether the resume link dump must emit `event`.
+    ///
+    /// [`Self::pause`] captured the link state known at pause time; only
+    /// interfaces whose state differs from that snapshot (or were unknown
+    /// then) are emitted.  Without a snapshot (e.g. the first link dump
+    /// after start), every event is emitted.
+    fn emit_on_resume(&self, event: &InterfaceLinkEvent) -> bool {
+        self.paused_state.as_ref().is_none_or(|paused_state| {
+            paused_state
+                .get(&event.iface_name)
+                .is_none_or(|last| !last.is_same_state(event))
+        })
+    }
+
+    /// Build the compact link-state record for `event`, attaching the MAC
+    /// observed for the interface when available.
+    fn last_link_event(&self, event: &InterfaceLinkEvent) -> LastLinkEvent {
+        LastLinkEvent::from_event(
+            event,
+            self.iface_mac.get(&event.iface_name).cloned(),
+        )
+    }
+
+    /// Handle one link event from the resume link dump.
+    ///
+    /// Interfaces which did not change since [`Self::pause`] are dropped;
+    /// changed (or previously unknown) interfaces go through the normal
+    /// notification path.
+    async fn handle_resume_event(
+        &mut self,
+        event: InterfaceLinkEvent,
+    ) -> Result<(), NipartError> {
+        if !self.emit_on_resume(&event) {
+            log::trace!(
+                "{}: link state is unchanged since monitor pause, no event \
+                 emitted",
+                event.iface_name
+            );
+            return Ok(());
+        }
+        self.try_notify(event).await
+    }
+
+    /// Emit delete events for interfaces which existed when the monitor
+    /// paused but are absent from the resume link dump.
+    ///
+    /// The event worker uses these to clean up the interface state and to
+    /// re-arm the saved monitors, so a NIC which reappears (possibly under
+    /// a different kernel name) gets its saved config applied again.
+    async fn handle_resume_deleted_ifaces(
+        &mut self,
+        seen_ifaces: &HashSet<String>,
+    ) -> Result<(), NipartError> {
+        let Some(paused_state) = self.paused_state.take() else {
+            return Ok(());
+        };
+        for (iface_name, last_event) in paused_state {
+            if seen_ifaces.contains(&iface_name) {
+                continue;
+            }
+            // The link dump no longer carries this interface's MAC, so
+            // restore it to let the delete event match a MAC watch.
+            if let Some(mac) = last_event.mac_address.clone() {
+                self.iface_mac.insert(iface_name.clone(), mac);
+            }
+            log::trace!(
+                "{iface_name}: interface disappeared while monitor paused, \
+                 emitting delete event"
+            );
+            let event = last_event.to_delete_event(&iface_name);
+            self.try_notify(event).await?;
+            self.iface_mac.remove(&iface_name);
+        }
+        Ok(())
+    }
+
     fn pause(&mut self) {
+        // Capture the link state known at pause time.  The next resume
+        // link dump is compared against it, so interfaces which did not
+        // change while the monitor was paused are not emitted again
+        // (otherwise the event worker would re-apply their saved config
+        // and restart their DHCP clients after every unrelated apply).
+        // Only the outermost pause captures: nested pauses happen while
+        // the netlink session is already down and must keep the state
+        // from before the whole paused period.
+        if self.paused_state.is_none() {
+            self.paused_state = Some(self.emited.clone());
+        }
         self.netlink_handle = None;
         self.netlink_msg_receiver = None;
         // The netlink session is over, but the last known link state is kept
@@ -429,10 +572,8 @@ impl NipartMonitorWorker {
                 if event.is_new_wifi_phy {
                     self.wifi_phys_emited.insert(event.iface_name.to_string());
                 }
-                self.emited.insert(
-                    event.iface_name.to_string(),
-                    LastLinkEvent::from_event(&event),
-                );
+                let last_event = self.last_link_event(&event);
+                self.emited.insert(event.iface_name.to_string(), last_event);
             }
             Ok(())
         } else {
@@ -497,18 +638,32 @@ impl NipartMonitorWorker {
             })?;
         tokio::spawn(conn);
 
+        let mut seen_ifaces = HashSet::new();
         let mut link_handle = handle.link().get().execute();
-        while let Some(Ok(link_msg)) = link_handle.next().await {
+        while let Some(link_msg) =
+            link_handle.try_next().await.map_err(|e| {
+                NipartError::new(
+                    ErrorKind::InvalidArgument,
+                    format!("Failed to dump interface link state: {e}"),
+                )
+            })?
+        {
             if let Some((event, mac)) =
                 parse_link_msg(&link_msg, self.wifi_monitor_enabled, false)
             {
                 if let Some(mac) = mac {
                     self.iface_mac.insert(event.iface_name.clone(), mac);
                 }
-                self.try_notify(event).await?;
+                seen_ifaces.insert(event.iface_name.clone());
+                self.handle_resume_event(event).await?;
             }
         }
 
+        // Interfaces missing from the dump disappeared during the pause.
+        self.handle_resume_deleted_ifaces(&seen_ifaces).await?;
+
+        // The link dump reconciled the paused period; later netlink events
+        // go through the normal deduplication and debounce path.
         self.netlink_handle = Some(handle);
         self.netlink_msg_receiver = Some(msg);
         Ok(())
@@ -559,10 +714,8 @@ impl NipartMonitorWorker {
                 self.emited.remove(&event.iface_name);
                 self.wifi_phys_emited.remove(&event.iface_name);
             } else {
-                self.emited.insert(
-                    event.iface_name.to_string(),
-                    LastLinkEvent::from_event(&event),
-                );
+                let last_event = self.last_link_event(&event);
+                self.emited.insert(event.iface_name.to_string(), last_event);
             }
             return Ok(());
         }
@@ -599,10 +752,9 @@ impl NipartMonitorWorker {
                 // and is dropped, losing saved wifi-cfg routes/IP config
                 // that must be applied on the re-association.
                 if !event.is_up && previous_event.is_up {
-                    self.emited.insert(
-                        event.iface_name.to_string(),
-                        LastLinkEvent::from_event(&event),
-                    );
+                    let last_event = self.last_link_event(&event);
+                    self.emited
+                        .insert(event.iface_name.to_string(), last_event);
                 }
                 // delay emit
                 self.delay_notify(event, Duration::from_secs(DOWN_WAIT_SEC));
