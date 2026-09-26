@@ -16,6 +16,7 @@ mod route_rule;
 mod serializer;
 mod vrf;
 mod vxlan;
+mod wait_online;
 mod wifi;
 mod wireguard;
 mod yaml_roundtrip;

@@ -20,8 +20,8 @@ pub struct NetworkState {
     /// Description for the whole desire state.
     pub description: Option<String>,
     /// Daemon wait-online configuration, if undefined, wait IPv4 or IPv6
-    /// gateway been set or previous saved configuration. If defined, override
-    /// previous saved configuration.
+    /// default gateway been set on a carrier-up interface or previous saved
+    /// configuration. If defined, override previous saved configuration.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
