@@ -29,6 +29,9 @@ wait-online:
 ## 行为
 
 * 当所有条件都满足时，守护进程认为网络已在线，`npt wait-online` 以状态码 0 退出。
+* 默认网关只有在它出口的接口链路可用时才有效：链路（例如 wifi）断开后静态默认
+  路由可能仍留在内核中，不能将其误判为网络已在线。无 carrier 的虚拟链路
+  （隧道、wireguard、dummy 等）只要处于 up 状态即视为可用。
 * 超时时，`npt wait-online` 以状态码 124 退出（与 `/usr/bin/timeout` 一致）。
 * 一旦守护进程达到在线状态，将停止跟踪后续的网络变更，**不会**重新检查条件
   是否仍然满足。
@@ -38,7 +41,7 @@ wait-online:
 | 条件 | 描述 |
 |---|---|
 | `saved-config-applied` | 所有已保存的配置已应用（不包括条件操作） |
-| `gateway` | 已添加 IPv4 或 IPv6 网关 |
-| `gateway4` | 已添加 IPv4 网关 |
-| `gateway6` | 已添加 IPv6 网关 |
+| `gateway` | 链路可用的接口上存在 IPv4 或 IPv6 默认网关 |
+| `gateway4` | 链路可用的接口上存在 IPv4 默认网关 |
+| `gateway6` | 链路可用的接口上存在 IPv6 默认网关 |
 
