@@ -94,46 +94,47 @@ impl NipartDnsServerConfig {
         for group in &self.groups {
             groups.insert(
                 group.name.clone(),
-                MudzGroupConfig {
+                MudzGroupConfig::new(
                     // A group without nameservers means "reply NXDOMAIN"
                     // to mudz as well.
-                    nameservers: group
+                    group
                         .upstream
                         .static_servers
                         .iter()
                         .map(upstream_server_string)
                         .collect(),
-                    domains: group.domains.clone(),
-                    disable_ipv6: group.upstream.disable_ipv6,
-                },
+                    group.domains.clone(),
+                    group.upstream.disable_ipv6,
+                ),
             );
         }
 
-        MudzConfig {
-            main: MudzMainConfig {
-                // TCP listens on the same address, like the daemon did
-                // before: `tcp_bind` defaults to `None` in mudz.
-                udp_bind: self.bind.to_string(),
-                max_cache_size: self.max_cache_size,
-                load_etc_hosts: self.load_etc_hosts,
-                ..Default::default()
-            },
-            fallback: MudzFallbackConfig {
-                nameservers: self
-                    .fallback
-                    .servers(&self.auto_dns_servers)
-                    .iter()
-                    .map(upstream_server_string)
-                    .collect(),
-                disable_ipv6: self.fallback.disable_ipv6,
-            },
-            doh: self.doh.as_ref().map(|doh| MudzDohConfig {
-                nameservers: doh.nameservers.clone(),
-                disable_ipv6: doh.disable_ipv6,
-                ..Default::default()
-            }),
-            groups,
-        }
+        // TCP listens on the same address, like the daemon did before:
+        // `tcp_bind` defaults to `None` in mudz. `log_level` keeps its
+        // default too since it only applies to the standalone `mudzd`
+        // binary; nipart installs its own logger.
+        let mut main = MudzMainConfig::default();
+        main.udp_bind = self.bind.to_string();
+        main.max_cache_size = self.max_cache_size;
+        main.load_etc_hosts = self.load_etc_hosts;
+
+        let fallback = MudzFallbackConfig::new(
+            self.fallback
+                .servers(&self.auto_dns_servers)
+                .iter()
+                .map(upstream_server_string)
+                .collect(),
+            self.fallback.disable_ipv6,
+        );
+
+        let doh = self.doh.as_ref().map(|doh| {
+            let mut doh_config = MudzDohConfig::default();
+            doh_config.nameservers = doh.nameservers.clone();
+            doh_config.disable_ipv6 = doh.disable_ipv6;
+            doh_config
+        });
+
+        MudzConfig::new(main, fallback, doh, groups)
     }
 
     /// Replace the dynamic nameservers.  The fallback upstream list is
