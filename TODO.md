@@ -40,3 +40,31 @@
   but fails consistently when the full file runs.
 - `wait-ip: no|any|ipv4|ipv6|ipv4+ipv6` for whether wait IP applied.
 - NmPolicy support as nmstate does
+- RFC 8910 captive portal support (DHCPv4 first): consume the patched
+  `mozim` (`[patch.crates-io]` path entry or a newer release) which
+  requests option 114 and the obsolete RFC 7710 option 160, parses the
+  API URI and exposes it via `DhcpV4Lease::captive_portal`,
+  `DhcpV4Lease::legacy_captive_portal` and
+  `DhcpV4Lease::captive_portal_api_url()`.
+- DHCPv4: remember the captive portal API URL and the option it came
+  from (114 or 160) in `NipartDhcpShareData` from `apply_lease()` for
+  every interface with DHCPv4, not only wifi-phy; decide whether the
+  daemonless path (`src/lib/no_daemon/dhcp.rs`) exposes it too.
+- Treat `urn:ietf:params:capport:unrestricted` as "explicitly no
+  captive portal" and skip portal probing.
+- While a lease carries a captive portal URL, probe a well-known
+  endpoint and expect an exact answer; bind the probe to the interface,
+  back off between attempts and only mark the network online after
+  consecutive successes (a state machine, not a restart per probe).
+- Restart the embedded DNS cache (re-apply the config so the cache
+  poisoned by the portal is dropped) only on the captive -> online
+  transition, retry the DoH bootstrap with backoff instead of leaving
+  the cache stopped, and expose a starting/error state.
+- Log portal state transitions with `log::info!` (interface, source
+  option, URL sanitized as untrusted network data) and expose the state
+  in `npt show` as read-only; a DBus/socket notification channel for
+  KDE/GNOME/sway applets is a later step.
+- Absence of the captive portal option must not mean "no captive
+  portal": legacy portals need probing anyway (later: probe after every
+  DHCP lease/link-up).
+- Not covered yet: DHCPv6 option 103 and IPv6 RA option 37.

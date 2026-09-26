@@ -200,6 +200,10 @@ fn mudz_error(error: mudz::MudzError) -> NipartError {
         mudz::ErrorKind::InvalidArgument
         | mudz::ErrorKind::InvalidConfig
         | mudz::ErrorKind::InvalidPacket => ErrorKind::InvalidArgument,
+        mudz::ErrorKind::Rejected => ErrorKind::DaemonFailure,
+        // `mudz::ErrorKind` is `#[non_exhaustive]`: treat kinds added by a
+        // newer mudz as daemon failures rather than failing to build.
+        _ => ErrorKind::DaemonFailure,
     };
     NipartError::new(kind, error.message)
 }
