@@ -220,3 +220,35 @@ fn test_extract_secrets_only_contains_iface_secrets() {
     assert_eq!(wifi_password(&secrets), Some("12345678"));
     assert_eq!(wifi_password(&state), Some(NetworkState::HIDE_SECRET_STR));
 }
+
+/// `MergedNetworkState`'s `Display`/JSON output must work even though its
+/// `user_ifaces` map is keyed by `(name, type)`: `serde_json` rejects
+/// tuple map keys ("key must be a string"), which used to make every
+/// debug log of a merged state emit a spurious
+/// `BUG: Failed to convert ... into JSON` line with a huge `Debug`
+/// fallback dump.
+#[test]
+fn test_merged_state_with_user_iface_serializes_to_json() {
+    let desired = NetworkState::new_from_yaml(
+        r#"---
+        interfaces:
+          - name: Test-WIFI
+            type: wifi-cfg
+            state: up
+            wifi:
+              ssid: Test-WIFI
+        "#,
+    )
+    .unwrap();
+    let merged = MergedNetworkState::new(
+        desired,
+        NetworkState::default(),
+        None,
+        NipartApplyOption::default(),
+    )
+    .unwrap();
+
+    let json =
+        serde_json::to_string(&merged).expect("merged state must serialize");
+    assert!(json.contains("Test-WIFI"), "unexpected JSON: {json}");
+}
