@@ -290,6 +290,23 @@ impl NipartMonitorManager {
         self.mgr.exec(NipartMonitorCmd::DisableWifiMonitor).await?;
         Ok(())
     }
+
+    /// Record wifi-phy kernel names the daemon has already handed to the
+    /// wifi plugin (the boot pass does this for every phy it applied).
+    ///
+    /// Without it, the first link event after the boot pass would be
+    /// announced as a new phy and the event worker would re-apply the
+    /// saved wifi-cfg set to a plugin that is already connecting with
+    /// exactly those networks.
+    pub(crate) async fn mark_wifi_phys_known(
+        &mut self,
+        iface_names: &[String],
+    ) -> Result<(), NipartError> {
+        self.mgr
+            .exec(NipartMonitorCmd::MarkWifiPhysKnown(iface_names.to_vec()))
+            .await?;
+        Ok(())
+    }
 }
 
 fn wifi_monitor_is_needed(full_saved_state: &NetworkState) -> bool {
