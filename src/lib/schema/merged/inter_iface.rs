@@ -33,6 +33,12 @@ pub struct MergedInterfaces {
     pub kernel_ifaces: HashMap<String, MergedInterface>,
     /// Interface does not have kernel interface index number.
     /// The HashMap key is interface name and type
+    ///
+    /// Serialized as a JSON object keyed by `<name>:<iface-type>`:
+    /// `serde_json` rejects tuple map keys ("key must be a string"),
+    /// which made every JSON/`Display` rendering of a merged state fail
+    /// and log a spurious `BUG:` line with a full `Debug` fallback dump.
+    #[serde(serialize_with = "serialize_user_ifaces")]
     pub user_ifaces: HashMap<(String, InterfaceType), MergedInterface>,
     /// The ordering of interface in desired YAML/JSON or original desired
     /// state `insert_order` property.
@@ -905,4 +911,24 @@ impl Interfaces {
         }
         Ok(())
     }
+}
+
+/// Serialize `(name, type)`-keyed user interfaces as a JSON object keyed
+/// by `<name>:<iface-type>`.
+///
+/// `serde_json` cannot serialize tuple map keys ("key must be a string"),
+/// so without this every `Display`/JSON rendering of a merged state fell
+/// back to `Debug` after logging a spurious `BUG:` line. Merged states
+/// are daemon-internal and never deserialized from JSON, hence only the
+/// serialization side is customized.
+fn serialize_user_ifaces<S>(
+    user_ifaces: &HashMap<(String, InterfaceType), MergedInterface>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_map(user_ifaces.iter().map(
+        |((name, iface_type), iface)| (format!("{name}:{iface_type}"), iface),
+    ))
 }
