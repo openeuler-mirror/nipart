@@ -648,18 +648,43 @@ fn build_shuli_networks(
 /// `prefered` is a per-connection hint, not a saved property: nipart may
 /// mark the requested SSID of a forced `npt up` as preferred, and a later
 /// re-apply of the same saved profiles must not treat that as a change.
+///
+/// The order of the entries is ignored as well: callers deliver the saved
+/// profiles through hash-map-backed state whose iteration order is not
+/// stable (a re-ordered re-apply must not be mistaken for a change and
+/// reset an in-flight connection).
 fn same_saved_networks_ignoring_prefered(
     current: &[ShuliNetworkConfig],
     desired: &[ShuliNetworkConfig],
 ) -> bool {
-    current.len() == desired.len()
-        && current.iter().zip(desired).all(|(cur, des)| {
-            let mut cur = cur.clone();
-            let mut des = des.clone();
-            cur.prefered = false;
-            des.prefered = false;
-            cur == des
-        })
+    if current.len() != desired.len() {
+        return false;
+    }
+    let normalized = |networks: &[ShuliNetworkConfig]| {
+        networks
+            .iter()
+            .cloned()
+            .map(|mut network| {
+                network.prefered = false;
+                network
+            })
+            .collect::<Vec<_>>()
+    };
+    let current = normalized(current);
+    let desired = normalized(desired);
+    // Match as a multiset so duplicate entries are compared correctly.
+    let mut matched = vec![false; desired.len()];
+    current.iter().all(|network| {
+        let Some(index) = desired
+            .iter()
+            .enumerate()
+            .position(|(index, other)| !matched[index] && other == network)
+        else {
+            return false;
+        };
+        matched[index] = true;
+        true
+    })
 }
 
 /// Whether a forced apply must restart shuli's scan selection by clearing
