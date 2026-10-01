@@ -176,6 +176,25 @@ fn same_saved_networks_ignoring_prefered_only() {
 }
 
 #[test]
+fn same_saved_networks_ignores_entry_order() {
+    // A re-ordered re-apply of the same profiles (the daemon delivers
+    // them through hash-map-backed state, so the order is not stable)
+    // must not be mistaken for a configuration change.
+    let a = network("A", None, false);
+    let b = network("B", Some("secret"), true);
+    assert!(same_saved_networks_ignoring_prefered(
+        &[a.clone(), b.clone()],
+        &[b.clone(), a.clone()]
+    ));
+
+    // Multiplicity still matters.
+    assert!(!same_saved_networks_ignoring_prefered(
+        &[a.clone(), a.clone()],
+        &[a.clone(), b.clone()]
+    ));
+}
+
+#[test]
 fn forced_single_ssid_rescans_when_already_on_desired_ssid() {
     let networks = [network("Home-SSID", None, true)];
     assert!(should_reconnect_to_networks(
