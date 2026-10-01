@@ -2,7 +2,8 @@
 
 use nipart::{
     ErrorKind, NetworkState, NipartApplyOption, NipartError, NipartQueryOption,
-    NipartWifiControl, NipartWifiScanOption, WifiScanResult,
+    NipartWifiConnectErrorOption, NipartWifiControl, NipartWifiScanOption,
+    WifiScanResult,
 };
 
 use super::{NipartPluginCmd, NipartPluginReply, NipartPluginWorker};
@@ -105,6 +106,19 @@ impl NipartPluginManager {
                 ),
             ))
         }
+    }
+
+    /// Query the WIFI plugin for a latched connection error of
+    /// `iface_name`/`ssid`. `Ok(())` means no error is known; an `Err`
+    /// (e.g. `ErrorKind::NoSupport`) is the plugin's error itself.
+    pub(crate) async fn wifi_connect_error(
+        &mut self,
+        opt: &NipartWifiConnectErrorOption,
+    ) -> Result<(), NipartError> {
+        self.mgr
+            .exec(NipartPluginCmd::WifiConnectError(Box::new(opt.clone())))
+            .await?;
+        Ok(())
     }
 
     /// Notify every plugin that the host resumed from system suspend.

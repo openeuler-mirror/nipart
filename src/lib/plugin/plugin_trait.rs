@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::{
     ErrorKind, NetworkState, NipartApplyOption, NipartError,
     NipartIpcConnection, NipartIpcListener, NipartPluginCmd, NipartPluginInfo,
-    NipartQueryOption, NipartWifiControl, NipartWifiScanOption, WifiScanResult,
+    NipartQueryOption, NipartWifiConnectErrorOption, NipartWifiControl,
+    NipartWifiScanOption, WifiScanResult,
 };
 
 pub trait NipartPlugin: Send + Sync + Sized + 'static {
@@ -96,6 +97,12 @@ pub trait NipartPlugin: Send + Sync + Sized + 'static {
                     NipartPluginCmd::WifiControl(control) => {
                         let result =
                             Self::wifi_control(&plugin, control, &mut conn)
+                                .await;
+                        conn.send(result).await?
+                    }
+                    NipartPluginCmd::WifiConnectError(opt) => {
+                        let result =
+                            Self::wifi_connect_error(&plugin, *opt, &mut conn)
                                 .await;
                         conn.send(result).await?
                     }
@@ -224,5 +231,21 @@ pub trait NipartPlugin: Send + Sync + Sized + 'static {
                 ),
             ))
         }
+    }
+
+    /// Return a latched WIFI connection error for `opt.iface_name` /
+    /// `opt.ssid` (e.g. shuli reporting `NoSupport` because the AP's
+    /// group cipher is TKIP), or `Ok(())` when no error is known.
+    ///
+    /// The daemon's connection waits use this to fail fast with the
+    /// plugin's error instead of waiting for a timeout. Must not block:
+    /// reply from cached state. The default implementation knows no
+    /// error.
+    fn wifi_connect_error(
+        _plugin: &Arc<Self>,
+        _opt: NipartWifiConnectErrorOption,
+        _conn: &mut NipartIpcConnection,
+    ) -> impl Future<Output = Result<(), NipartError>> + Send {
+        async { Ok(()) }
     }
 }

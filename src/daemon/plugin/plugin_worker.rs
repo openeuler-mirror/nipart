@@ -11,7 +11,8 @@ use futures_util::{StreamExt, stream::FuturesUnordered};
 use nipart::{
     ErrorKind, InterfaceType, NetworkState, NipartApplyOption, NipartError,
     NipartInterface, NipartNoDaemon, NipartPluginClient, NipartQueryOption,
-    NipartWifiControl, NipartWifiScanOption, WifiScanResult,
+    NipartWifiConnectErrorOption, NipartWifiControl, NipartWifiScanOption,
+    WifiScanResult,
 };
 
 const NPT_PLUGIN_SOCK_DIR: &str = "/var/run/nipart/sockets/plugin";
@@ -29,6 +30,7 @@ pub(crate) enum NipartPluginCmd {
     ApplyNetworkState(Box<(NetworkState, NipartApplyOption)>),
     WifiScan(Box<NipartWifiScanOption>),
     WifiControl(NipartWifiControl),
+    WifiConnectError(Box<NipartWifiConnectErrorOption>),
     SystemResume,
 }
 
@@ -46,6 +48,9 @@ impl std::fmt::Display for NipartPluginCmd {
             }
             Self::WifiControl(_) => {
                 write!(f, "wifi-control")
+            }
+            Self::WifiConnectError(_) => {
+                write!(f, "wifi-connect-error")
             }
             Self::SystemResume => {
                 write!(f, "system-resume")
@@ -230,6 +235,20 @@ impl TaskWorker for NipartPluginWorker {
                     }
                     if let Err(e) = plugin.wifi_control(control).await {
                         log::info!("{e}");
+                    }
+                }
+                Ok(NipartPluginReply::None)
+            }
+            NipartPluginCmd::WifiConnectError(opt) => {
+                // The wifi plugin latches connection errors (e.g. shuli
+                // reporting an unsupported security mode); the first
+                // error is the answer the daemon waits for.
+                for plugin in self.plugins.values() {
+                    if !plugin.is_wifi_plugin() {
+                        continue;
+                    }
+                    if let Err(e) = plugin.wifi_connect_error(&opt).await {
+                        return Err(e);
                     }
                 }
                 Ok(NipartPluginReply::None)
