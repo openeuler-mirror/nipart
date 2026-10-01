@@ -74,8 +74,8 @@ pub use self::{
         RouteRules,
     },
     state_options::{
-        NipartApplyOption, NipartQueryOption, NipartWifiControl,
-        NipartWifiScanOption,
+        NipartApplyOption, NipartQueryOption, NipartWifiConnectErrorOption,
+        NipartWifiControl, NipartWifiScanOption,
     },
     version::CUR_SCHEMA_VERSION,
     wait_online::{NipartWaitOnline, NipartWaitOnlineCondition},

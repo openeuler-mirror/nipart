@@ -144,6 +144,33 @@ impl NipartWifiScanOption {
     }
 }
 
+/// Query the WIFI plugin for a latched connection error.
+///
+/// The daemon's waits (e.g. DHCP waiting for the associated SSID) use it
+/// to distinguish "the SSID is not there yet" from "the plugin already
+/// knows the connection cannot succeed" - for example an AP whose group
+/// cipher is TKIP, which shuli reports as
+/// `ErrorKind::NoSupport: TKIP WPA2 is not supported`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonDisplay)]
+#[non_exhaustive]
+#[serde(rename_all = "kebab-case")]
+pub struct NipartWifiConnectErrorOption {
+    /// Kernel name of the WIFI interface (e.g. `wlan0`).
+    pub iface_name: String,
+    /// SSID the pending connection attempt is for. An error latched for
+    /// another SSID is not reported.
+    pub ssid: String,
+}
+
+impl NipartWifiConnectErrorOption {
+    pub fn new(iface_name: &str, ssid: &str) -> Self {
+        Self {
+            iface_name: iface_name.to_string(),
+            ssid: ssid.to_string(),
+        }
+    }
+}
+
 /// WIFI radio/function control requested through `npt wifi on|off`.
 ///
 /// For now this only tells the WIFI plugin to stop (or resume) all WIFI

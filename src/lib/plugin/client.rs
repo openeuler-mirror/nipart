@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     JsonDisplayHideSecrets, NetworkState, NipartApplyOption, NipartCanIpc,
     NipartError, NipartIpcConnection, NipartPluginInfo, NipartQueryOption,
-    NipartWifiControl, NipartWifiScanOption, WifiScanResult,
+    NipartWifiConnectErrorOption, NipartWifiControl, NipartWifiScanOption,
+    WifiScanResult,
 };
 
 #[derive(Debug)]
@@ -29,6 +30,10 @@ pub enum NipartPluginCmd {
     ApplyNetworkState(Box<(NetworkState, NipartApplyOption)>),
     WifiScan(Box<NipartWifiScanOption>),
     WifiControl(NipartWifiControl),
+    /// Query a latched WIFI connection error (e.g. unsupported security)
+    /// for one interface/SSID. Replies `Ok(())` when no error is
+    /// latched, otherwise the error itself.
+    WifiConnectError(Box<NipartWifiConnectErrorOption>),
     /// The host resumed from system suspend. Plugins should re-check the
     /// state they manage in the kernel and cancel any retry backoff that
     /// was armed before the suspend.
@@ -44,6 +49,7 @@ impl NipartCanIpc for NipartPluginCmd {
             Self::ApplyNetworkState(_) => "apply-network-state".to_string(),
             Self::WifiScan(_) => "wifi-scan".to_string(),
             Self::WifiControl(_) => "wifi-control".to_string(),
+            Self::WifiConnectError(_) => "wifi-connect-error".to_string(),
             Self::SystemResume => "system-resume".to_string(),
             Self::Quit => "quit".to_string(),
         }
@@ -126,6 +132,18 @@ impl NipartPluginClient {
     ) -> Result<(), NipartError> {
         self.ipc
             .send(Ok(NipartPluginCmd::WifiControl(control)))
+            .await?;
+        self.ipc.recv::<()>().await
+    }
+
+    /// Ask the plugin for a latched WIFI connection error of
+    /// `iface_name`/`ssid`. `Ok(())` means no error is known.
+    pub async fn wifi_connect_error(
+        &mut self,
+        opt: NipartWifiConnectErrorOption,
+    ) -> Result<(), NipartError> {
+        self.ipc
+            .send(Ok(NipartPluginCmd::WifiConnectError(Box::new(opt))))
             .await?;
         self.ipc.recv::<()>().await
     }

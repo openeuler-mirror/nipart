@@ -2,8 +2,9 @@
 
 use nipart::{
     NetworkState, NipartApplyOption, NipartError, NipartInterface,
-    NipartPluginClient, NipartPluginInfo, NipartQueryOption, NipartWifiControl,
-    NipartWifiScanOption, WifiScanResult,
+    NipartPluginClient, NipartPluginInfo, NipartQueryOption,
+    NipartWifiConnectErrorOption, NipartWifiControl, NipartWifiScanOption,
+    WifiScanResult,
 };
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,14 @@ impl NipartDaemonPlugin {
     ) -> Result<(), NipartError> {
         let mut cli = NipartPluginClient::new(&self.socket_path).await?;
         cli.wifi_control(control).await
+    }
+
+    pub(crate) async fn wifi_connect_error(
+        &self,
+        opt: &NipartWifiConnectErrorOption,
+    ) -> Result<(), NipartError> {
+        let mut cli = NipartPluginClient::new(&self.socket_path).await?;
+        cli.wifi_connect_error(opt.clone()).await
     }
 
     pub(crate) async fn system_resume(&self) -> Result<(), NipartError> {
