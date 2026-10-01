@@ -12,13 +12,17 @@ use std::{
 use nipart::{
     ErrorKind, Interface, InterfaceType, NetworkState, NipartApplyOption,
     NipartError, NipartIpcConnection, NipartPlugin, NipartPluginInfo,
-    NipartQueryOption, NipartWifiControl, NipartWifiScanOption, WifiScanResult,
+    NipartQueryOption, NipartWifiConnectErrorOption, NipartWifiControl,
+    NipartWifiScanOption, WifiScanResult,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::{
     NipartWpaConn,
-    apply::{WifiClientState, WifiLiveState},
+    apply::{
+        WifiClientState, WifiConnectError, WifiLiveState,
+        clear_applied_connect_errors, latched_connect_error,
+    },
 };
 
 /// Maximum time a single shuli client cycle may run before the plugin
@@ -36,6 +40,12 @@ pub(crate) struct NipartPluginWifi {
     worker_tx: tokio::sync::mpsc::UnboundedSender<WifiWorkerRequest>,
     wifi_enabled: Arc<AtomicBool>,
     wifi_live: Arc<Mutex<HashMap<String, WifiLiveState>>>,
+    /// Connection errors shuli reported for an interface, latched by the
+    /// apply worker and answered by
+    /// [`NipartPlugin::wifi_connect_error()`] so the daemon can fail a
+    /// connection wait fast (e.g. `NoSupport: TKIP WPA2 is not
+    /// supported`).
+    wifi_errors: Arc<Mutex<HashMap<String, WifiConnectError>>>,
 }
 
 #[derive(Debug)]
@@ -61,8 +71,10 @@ async fn apply_worker(
     mut rx: UnboundedReceiver<WifiWorkerRequest>,
     wifi_enabled: Arc<AtomicBool>,
     wifi_live: Arc<Mutex<HashMap<String, WifiLiveState>>>,
+    wifi_errors: Arc<Mutex<HashMap<String, WifiConnectError>>>,
 ) {
-    let mut wifi_state = WifiClientState::new(wifi_enabled, wifi_live);
+    let mut wifi_state =
+        WifiClientState::new(wifi_enabled, wifi_live, wifi_errors);
     loop {
         let run_once_timeout_secs = if wifi_state.is_connected() {
             WIFI_CONNECTED_RUN_ONCE_TIMEOUT_SECS
@@ -134,15 +146,18 @@ impl NipartPlugin for NipartPluginWifi {
         let (worker_tx, worker_rx) = unbounded_channel();
         let wifi_enabled = Arc::new(AtomicBool::new(true));
         let wifi_live = Arc::new(Mutex::new(HashMap::new()));
+        let wifi_errors = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(apply_worker(
             worker_rx,
             wifi_enabled.clone(),
             wifi_live.clone(),
+            wifi_errors.clone(),
         ));
         Ok(Self {
             worker_tx,
             wifi_enabled,
             wifi_live,
+            wifi_errors,
         })
     }
 
@@ -193,6 +208,15 @@ impl NipartPlugin for NipartPluginWifi {
         // like a change and reset an in-flight connection.
         let ifaces: Vec<Interface> =
             desired_state.ifaces.iter().cloned().collect();
+        // A new apply invalidates a previously latched connection error
+        // for the profiles it carries (e.g. the AP was reconfigured since
+        // the last attempt). Doing it here, before the apply worker
+        // processes the request, means the daemon's connection wait -
+        // which starts after this apply was acknowledged - can never fail
+        // on the stale error.
+        if let Ok(mut errors) = plugin.wifi_errors.lock() {
+            clear_applied_connect_errors(&mut errors, &ifaces);
+        }
         // Never block: enqueue the request to the dedicated apply worker
         // and return immediately. The daemon verification stage waits and
         // retries until the applied state matches the desired state.
@@ -277,5 +301,28 @@ impl NipartPlugin for NipartPluginWifi {
                     format!("Failed to enqueue wifi resume request: {e}"),
                 )
             })
+    }
+
+    async fn wifi_connect_error(
+        plugin: &Arc<Self>,
+        opt: NipartWifiConnectErrorOption,
+        conn: &mut NipartIpcConnection,
+    ) -> Result<(), NipartError> {
+        conn.log_trace(format!("WIFI plugin wifi_connect_error with {opt}"))
+            .await;
+        // Never block: the error is latched by the apply worker in the
+        // shared map, so answering needs no worker round trip.
+        let errors = plugin.wifi_errors.lock().map_err(|e| {
+            NipartError::new(
+                ErrorKind::Bug,
+                format!("Failed to lock WIFI connection errors: {e}"),
+            )
+        })?;
+        if let Some(error) =
+            latched_connect_error(&errors, &opt.iface_name, &opt.ssid)
+        {
+            return Err(error);
+        }
+        Ok(())
     }
 }

@@ -38,12 +38,68 @@ pub(crate) struct WifiLiveState {
     pub(crate) bssid: Option<String>,
 }
 
+/// A connection error the shuli client reported for one interface/SSID
+/// (e.g. `NoSupport: TKIP WPA2 is not supported`).
+///
+/// Latched by the apply worker and answered by
+/// [`nipart::NipartPlugin::wifi_connect_error`] so the daemon can abort
+/// a connection wait with the real reason instead of a timeout.
+#[derive(Debug, Clone)]
+pub(crate) struct WifiConnectError {
+    pub(crate) ssid: String,
+    pub(crate) error: NipartError,
+}
+
+/// Look up a latched connection error for `iface_name`/`ssid`.
+///
+/// A latched error is only returned when it belongs to the queried
+/// interface *and* SSID: a stale error of another network must not fail
+/// a fresh connection wait.
+pub(crate) fn latched_connect_error(
+    errors: &HashMap<String, WifiConnectError>,
+    iface_name: &str,
+    ssid: &str,
+) -> Option<NipartError> {
+    errors
+        .get(iface_name)
+        .filter(|latched| latched.ssid == ssid)
+        .map(|latched| latched.error.clone())
+}
+
+/// Drop latched connection errors for the SSIDs a new apply carries.
+///
+/// Called when the apply reaches the plugin (before the apply worker
+/// processes it), so the daemon's connection wait - which starts after
+/// the apply was acknowledged - can never fail on an error of a previous
+/// attempt (e.g. the AP was reconfigured since then).
+pub(crate) fn clear_applied_connect_errors(
+    errors: &mut HashMap<String, WifiConnectError>,
+    ifaces: &[Interface],
+) {
+    let applied_ssids: Vec<&str> = ifaces
+        .iter()
+        .filter_map(|iface| match iface {
+            Interface::WifiCfg(cfg) => {
+                cfg.wifi.as_ref().map(|wifi| wifi.ssid.as_str())
+            }
+            Interface::WifiPhy(phy) => {
+                phy.wifi.as_ref().map(|wifi| wifi.ssid.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    errors.retain(|_, latched| {
+        !applied_ssids.iter().any(|ssid| *ssid == latched.ssid)
+    });
+}
+
 /// The plugin-side wifi state: one shuli `WifiClient` for all wifi-phy
 /// interfaces plus the per-interface metadata the apply flow needs.
 pub(crate) struct WifiClientState {
     client: Option<WifiClient>,
     ifaces: HashMap<String, WifiIfaceState>,
     live_ifaces: Arc<Mutex<HashMap<String, WifiLiveState>>>,
+    connect_errors: Arc<Mutex<HashMap<String, WifiConnectError>>>,
     enabled: bool,
     enabled_flag: Arc<AtomicBool>,
     connected: bool,
@@ -53,11 +109,13 @@ impl WifiClientState {
     pub(crate) fn new(
         enabled_flag: Arc<AtomicBool>,
         live_ifaces: Arc<Mutex<HashMap<String, WifiLiveState>>>,
+        connect_errors: Arc<Mutex<HashMap<String, WifiConnectError>>>,
     ) -> Self {
         Self {
             client: None,
             ifaces: HashMap::new(),
             live_ifaces,
+            connect_errors,
             enabled: true,
             enabled_flag,
             connected: false,
@@ -81,6 +139,30 @@ impl WifiClientState {
         if let Ok(mut live_ifaces) = self.live_ifaces.lock() {
             live_ifaces.remove(iface_name);
             self.connected = !live_ifaces.is_empty();
+        }
+    }
+
+    /// Latch a connection error for `iface_name` so
+    /// `NipartPlugin::wifi_connect_error()` can report it to the daemon
+    /// while a connection wait is still running.
+    fn set_connect_error(&self, iface_name: &str, error: WifiConnectError) {
+        if let Ok(mut errors) = self.connect_errors.lock() {
+            errors.insert(iface_name.to_string(), error);
+        }
+    }
+
+    /// Forget the latched error of one interface after a fresh attempt
+    /// or a successful connection.
+    fn clear_connect_error(&self, iface_name: &str) {
+        if let Ok(mut errors) = self.connect_errors.lock() {
+            errors.remove(iface_name);
+        }
+    }
+
+    /// Forget every latched error (client restart, WIFI off, shutdown).
+    fn clear_all_connect_errors(&self) {
+        if let Ok(mut errors) = self.connect_errors.lock() {
+            errors.clear();
         }
     }
 
@@ -157,12 +239,45 @@ impl WifiClientState {
         let Some(client) = self.client.as_mut() else {
             return Ok(());
         };
-        let result = client.run().await.map_err(|e| {
-            NipartError::new(
-                ErrorKind::PluginFailure,
-                format!("WIFI client run failed: {e}"),
-            )
-        })?;
+        let result = match client.run().await {
+            Ok(result) => result,
+            Err(e) => {
+                // A persistent condition shuli already diagnosed (e.g.
+                // the AP's unsupported TKIP security) is latched so the
+                // daemon's connection wait can return it instead of
+                // timing out. The client keeps retrying in the
+                // background; a later success clears the latch.
+                if e.kind == shuli::ErrorKind::NoSupport {
+                    let iface_name = e.iface_name.clone().unwrap_or_default();
+                    let ssid = e
+                        .ssid
+                        .clone()
+                        .filter(|ssid| !ssid.is_empty())
+                        .unwrap_or_else(|| {
+                            client
+                                .current_ssid(&iface_name)
+                                .unwrap_or_default()
+                                .to_string()
+                        });
+                    log::warn!("WIFI {iface_name} reports: {e}");
+                    self.set_connect_error(
+                        &iface_name,
+                        WifiConnectError {
+                            ssid,
+                            error: NipartError::new(
+                                ErrorKind::NoSupport,
+                                e.msg.clone(),
+                            ),
+                        },
+                    );
+                    return Ok(());
+                }
+                return Err(NipartError::new(
+                    ErrorKind::PluginFailure,
+                    format!("WIFI client run failed: {e}"),
+                ));
+            }
+        };
         let iface_name = &result.iface_name;
         match result.state {
             WifiState::ConnectedWithoutOffloadRekey
@@ -179,6 +294,7 @@ impl WifiClientState {
                     "WIFI connected on {iface_name}: SSID {ssid}, BSSID {}",
                     bssid.as_deref().unwrap_or("00:00:00:00:00:00")
                 );
+                self.clear_connect_error(iface_name);
                 self.set_live_connected(
                     iface_name,
                     WifiLiveState { ssid, bssid },
@@ -212,6 +328,7 @@ impl WifiClientState {
             client.shutdown().await;
         }
         self.connected = false;
+        self.clear_all_connect_errors();
         self.clear_live_ifaces();
     }
 
@@ -478,6 +595,14 @@ impl WifiClientState {
                 )
             })
             .collect();
+        // A new apply is a fresh connection attempt: drop the latched
+        // errors of the interfaces it updates so a stale "unsupported
+        // security" cannot fail the new connection wait.
+        let updated_ifaces: Vec<String> =
+            pending_networks.keys().cloned().collect();
+        for iface_name in &updated_ifaces {
+            self.clear_connect_error(iface_name);
+        }
         if let Some(client) = self.client.as_mut() {
             for (iface_name, networks) in pending_networks {
                 if force_reconnects.get(&iface_name).copied().unwrap_or(false) {
@@ -526,6 +651,7 @@ impl WifiClientState {
 
     async fn start_client(&mut self) {
         self.connected = false;
+        self.clear_all_connect_errors();
         self.clear_live_ifaces();
         if self.ifaces.is_empty() {
             self.client = None;

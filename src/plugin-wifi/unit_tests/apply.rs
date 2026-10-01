@@ -31,11 +31,77 @@ fn has_wifi_ssid_up_request_requires_ssid() {
     ))]));
 }
 
+fn wifi_errors() -> Arc<Mutex<HashMap<String, WifiConnectError>>> {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn no_support_error(ssid: &str) -> WifiConnectError {
+    WifiConnectError {
+        ssid: ssid.to_string(),
+        error: NipartError::new(
+            ErrorKind::NoSupport,
+            "TKIP WPA2 is not supported".to_string(),
+        ),
+    }
+}
+
+#[test]
+fn clear_applied_connect_errors_drops_only_matching_ssids() {
+    let mut errors = HashMap::new();
+    errors.insert("wlan0".to_string(), no_support_error("空蝉"));
+    errors.insert("wlan1".to_string(), no_support_error("SweatHome5G"));
+
+    // A new apply of 空蝉 invalidates its stale error only.
+    let (cfg_iface, _) = cfg_iface("空蝉", None);
+    clear_applied_connect_errors(&mut errors, &[cfg_iface]);
+
+    assert!(!errors.contains_key("wlan0"));
+    assert!(errors.contains_key("wlan1"));
+}
+
+#[test]
+fn latched_connect_error_matches_iface_and_ssid() {
+    let mut errors = HashMap::new();
+    errors.insert("wlan0".to_string(), no_support_error("空蝉"));
+
+    let err = latched_connect_error(&errors, "wlan0", "空蝉")
+        .expect("matching iface+ssid must report the error");
+    assert_eq!(err.kind(), ErrorKind::NoSupport);
+    assert_eq!(err.msg(), "TKIP WPA2 is not supported");
+
+    // Another SSID or interface must not see the stale error.
+    assert!(latched_connect_error(&errors, "wlan0", "Other").is_none());
+    assert!(latched_connect_error(&errors, "wlan1", "空蝉").is_none());
+}
+
+#[test]
+fn connect_error_latch_is_cleared_for_new_attempt_and_restart() {
+    let errors = wifi_errors();
+    let enabled_flag = Arc::new(AtomicBool::new(true));
+    let wifi_live = Arc::new(Mutex::new(HashMap::new()));
+    let mut state =
+        WifiClientState::new(enabled_flag, wifi_live, errors.clone());
+
+    state.set_connect_error("wlan0", no_support_error("空蝉"));
+    assert!(errors.lock().unwrap().contains_key("wlan0"));
+
+    // A fresh apply of the interface clears the latch.
+    state.clear_connect_error("wlan0");
+    assert!(errors.lock().unwrap().is_empty());
+
+    // A client restart drops every latched error.
+    state.set_connect_error("wlan0", no_support_error("空蝉"));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(state.restart_client());
+    assert!(errors.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn set_control_off_on_toggles_wifi_state() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));
-    let mut state = WifiClientState::new(enabled_flag.clone(), wifi_live);
+    let mut state =
+        WifiClientState::new(enabled_flag.clone(), wifi_live, wifi_errors());
 
     state.set_control(NipartWifiControl::Off).await.unwrap();
     assert!(!enabled_flag.load(Ordering::Acquire));
@@ -52,7 +118,8 @@ async fn set_control_off_on_toggles_wifi_state() {
 async fn restart_client_resets_connected_state() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));
-    let mut state = WifiClientState::new(enabled_flag, wifi_live);
+    let mut state =
+        WifiClientState::new(enabled_flag, wifi_live, wifi_errors());
     state.connected = true;
 
     state.restart_client().await;
@@ -65,7 +132,7 @@ async fn restart_client_resets_connected_state() {
 fn notify_resume_without_client_is_noop() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));
-    let state = WifiClientState::new(enabled_flag, wifi_live);
+    let state = WifiClientState::new(enabled_flag, wifi_live, wifi_errors());
 
     state.notify_resume();
 
@@ -76,7 +143,8 @@ fn notify_resume_without_client_is_noop() {
 fn live_state_tracks_connected_ifaces_per_interface() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));
-    let mut state = WifiClientState::new(enabled_flag, wifi_live.clone());
+    let mut state =
+        WifiClientState::new(enabled_flag, wifi_live.clone(), wifi_errors());
 
     state.set_live_connected(
         "wlan0",
@@ -110,7 +178,8 @@ fn live_state_tracks_connected_ifaces_per_interface() {
 async fn set_control_off_clears_live_state() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));
-    let mut state = WifiClientState::new(enabled_flag, wifi_live.clone());
+    let mut state =
+        WifiClientState::new(enabled_flag, wifi_live.clone(), wifi_errors());
     state.set_live_connected(
         "wlan0",
         WifiLiveState {
