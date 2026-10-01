@@ -279,6 +279,26 @@ impl NipartCommander {
                 ))
                 .await;
             }
+            // The boot pass has just handed every applied wifi-phy to the
+            // wifi plugin. Record them as known to the monitor: the link
+            // dump emitted when the monitor resumes would otherwise
+            // announce them as new phys and the event worker would
+            // re-apply the saved wifi-cfg set to the plugin in the middle
+            // of its connection attempt (which reset shuli's in-flight
+            // 4-way handshake and cost the retry backoff).
+            let applied_wifi_phys: Vec<String> = boot_applied_ifaces
+                .iter()
+                .filter(|iface| {
+                    iface.iface_type() == &InterfaceType::WifiPhy
+                        && !iface.kernel_iface_name().is_empty()
+                })
+                .map(|iface| iface.kernel_iface_name().to_string())
+                .collect();
+            if !applied_wifi_phys.is_empty() {
+                self.monitor_manager
+                    .mark_wifi_phys_known(&applied_wifi_phys)
+                    .await?;
+            }
             // A DHCP-enabled interface whose lease survived the daemon
             // restart still carries its address in the kernel (reported
             // with `dhcp: true`), so the boot apply sees no diff and

@@ -231,6 +231,54 @@ fn test_pause_keeps_last_state_and_wifi_phys_emited() {
 }
 
 #[test]
+fn test_mark_wifi_phys_known_suppresses_new_phy_event() {
+    // The boot pass applies the saved wifi config to every present
+    // wifi-phy and then records the phy as known. The link dump emitted
+    // when the monitor resumes must not announce it as a new phy: the
+    // event worker would re-apply the saved wifi config and reset the
+    // wifi plugin's in-flight connection attempt.
+    let mut worker = gen_worker();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(worker.process_cmd(NipartMonitorCmd::MarkWifiPhysKnown(vec![
+        "wlan0".to_string(),
+    ])))
+    .unwrap();
+    assert!(worker.wifi_phys_emited.contains("wlan0"));
+
+    let (tx, mut rx) = unbounded();
+    worker.msg_to_commander = Some(tx);
+    worker.wifi_monitor_enabled = true;
+    let event = InterfaceLinkEvent::new(
+        "wlan0".to_string(),
+        10,
+        InterfaceType::WifiPhy,
+        true,
+        None,
+    );
+    rt.block_on(worker.notify(event)).unwrap();
+    let NipartManagerCmd::LinkEvent(event) = rx.try_recv().unwrap() else {
+        panic!("Expected a link event");
+    };
+    assert!(!event.is_new_wifi_phy);
+
+    // A phy the daemon never applied (e.g. hotplug after boot) is still
+    // announced as new so the plugin receives the saved profiles.
+    let hotplug = InterfaceLinkEvent::new(
+        "wlan1".to_string(),
+        11,
+        InterfaceType::WifiPhy,
+        true,
+        None,
+    );
+    rt.block_on(worker.notify(hotplug)).unwrap();
+    let NipartManagerCmd::LinkEvent(event) = rx.try_recv().unwrap() else {
+        panic!("Expected a link event");
+    };
+    assert!(event.is_new_wifi_phy);
+}
+
+#[test]
 fn test_notify_marks_new_wifi_phy_only_once() {
     let mut worker = gen_worker();
     worker.wifi_monitor_enabled = true;

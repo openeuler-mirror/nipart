@@ -142,6 +142,12 @@ pub(crate) enum NipartMonitorCmd {
     EnableWifiMonitor,
     /// Stop monitoring on WIFI SSID association
     DisableWifiMonitor,
+    /// Record wifi-phy kernel names the daemon has already applied (the
+    /// boot pass hands every applied phy to the wifi plugin). A later
+    /// link event of such a phy must not be announced as a new phy, or
+    /// the event worker would re-apply the saved wifi config and disturb
+    /// the plugin's in-flight connection attempt.
+    MarkWifiPhysKnown(Vec<String>),
     /// Stop the monitoring but preserving the internal monitoring list.
     /// Nested pauses require the same number of resumes before monitoring
     /// restarts.
@@ -180,6 +186,9 @@ impl std::fmt::Display for NipartMonitorCmd {
             }
             Self::DisableWifiMonitor => {
                 write!(f, "disable-wifi-monitor")
+            }
+            Self::MarkWifiPhysKnown(ifaces) => {
+                write!(f, "mark-wifi-phys-known:{ifaces:?}")
             }
             Self::Pause => {
                 write!(f, "pause-monitor")
@@ -321,6 +330,11 @@ impl TaskWorker for NipartMonitorWorker {
                 self.wifi_monitor_enabled = false;
                 if self.should_pause() {
                     self.pause();
+                }
+            }
+            NipartMonitorCmd::MarkWifiPhysKnown(ifaces) => {
+                for iface in ifaces {
+                    self.wifi_phys_emited.insert(iface);
                 }
             }
             NipartMonitorCmd::Pause => {
