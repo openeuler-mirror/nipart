@@ -160,3 +160,14 @@ Query only property. The signal strength in dBm.
 ## `signal-percent`: Signal percentage
 
 Query only property. The signal strength as a percentage (0-100).
+
+## Unsupported security
+
+Nipart refuses networks whose security mode shuli does not implement
+instead of associating insecurely. An AP that only offers a deprecated
+mode - for example a WPA/WPA2 hybrid router whose group cipher is TKIP -
+makes `npt wifi connect <SSID>` fail as soon as the scan finds it, with:
+
+    NipartError: no-support: TKIP WPA2 is not supported
+
+Reconfigure the AP to WPA2/WPA3 with AES (CCMP) to connect.

@@ -9,8 +9,8 @@ use std::{collections::HashSet, time::Duration};
 
 use nipart::{
     ErrorKind, Interface, MergedInterface, MergedInterfaces, NipartError,
-    NipartInterface, NipartNoDaemon, NipartQueryOption, WifiCfgInterface,
-    WifiPhyInterface,
+    NipartInterface, NipartNoDaemon, NipartQueryOption,
+    NipartWifiConnectErrorOption, WifiCfgInterface, WifiPhyInterface,
 };
 
 pub(crate) use self::{
@@ -167,6 +167,22 @@ pub(crate) async fn wait_wifi_ssid(
     let deadline = std::time::Instant::now()
         + Duration::from_secs(WIFI_SSID_WAIT_TIMEOUT_SECS);
     loop {
+        // A plugin-diagnosed failure (e.g. shuli: `NoSupport: TKIP WPA2
+        // is not supported`) fails the wait immediately with the real
+        // reason instead of polling until the timeout.
+        if let Err(e) = plugin_manager
+            .wifi_connect_error(&NipartWifiConnectErrorOption::new(
+                iface_name, ssid,
+            ))
+            .await
+        {
+            if e.kind() == ErrorKind::NoSupport {
+                return Err(e);
+            }
+            log::debug!(
+                "wifi connection error query on {iface_name}/{ssid}: {e}"
+            );
+        }
         let mut state =
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
