@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nipart::{
-    DnsResolver, ErrorKind, Interface, InterfaceType, MergedNetworkState,
-    NetworkState, NipartApplyOption, NipartError, NipartInterface,
-    NipartIpcConnection, NipartNoDaemon,
+    DnsResolver, ErrorKind, Interface, InterfaceAutoConnect, InterfaceType,
+    MergedNetworkState, NetworkState, NipartApplyOption, NipartError,
+    NipartInterface, NipartIpcConnection, NipartNoDaemon,
 };
 
 use super::commander::NipartCommander;
@@ -207,6 +207,21 @@ impl NipartCommander {
         let mut opt = NipartApplyOption::default();
         opt.no_verify = true;
 
+        // A failed partial apply that carried WIFI profiles (e.g.
+        // `npt wifi connect` to an AP with an unsupported security mode)
+        // made the wifi plugin replace its runtime network list with just
+        // the requested profile. The generic revert below only removes
+        // that profile, which would leave shuli with no network at all
+        // and drop the previous connection until a manual `npt up`; hand
+        // the saved profiles back after the revert so shuli reconnects to
+        // the best remaining network by itself.
+        let revert_touches_wifi = revert_state.ifaces.iter().any(|iface| {
+            matches!(
+                iface.iface_type(),
+                InterfaceType::WifiCfg | InterfaceType::WifiPhy
+            )
+        });
+
         let current_state = self
             .query_network_state(conn.as_deref_mut(), Default::default())
             .await?;
@@ -229,6 +244,9 @@ impl NipartCommander {
         self.plugin_manager
             .apply_network_state(&apply_state, &opt)
             .await?;
+        if revert_touches_wifi {
+            self.restore_saved_wifi_profiles().await?;
+        }
 
         self.dhcpv4_manager
             .apply_dhcp_config(
@@ -246,6 +264,33 @@ impl NipartCommander {
         self.notify_dns_cache_on_gateway_change(&merged_state).await;
 
         Ok(())
+    }
+
+    /// Hand the saved WIFI profiles back to the wifi plugin after a
+    /// rollback.
+    ///
+    /// A successful apply persists the desired profiles and the plugin
+    /// rebuilds its runtime network list from the applied state. A failed
+    /// partial apply (e.g. `npt wifi connect` to an AP shuli cannot
+    /// join) already replaced that runtime list with just the requested
+    /// profile, and reverting only removes the profile: without this
+    /// restore shuli would be left with no network and the previous
+    /// connection would only return with a manual `npt up`.
+    ///
+    /// The restore is `memory-only` (the saved state is unchanged) and
+    /// applies only to the plugin: the link-up event path configures the
+    /// IP stack again once shuli associates.
+    async fn restore_saved_wifi_profiles(&mut self) -> Result<(), NipartError> {
+        let saved_state = self.conf_manager.query_state().await?;
+        let wifi_state = saved_wifi_restore_state(&saved_state);
+        if wifi_state.is_empty() {
+            return Ok(());
+        }
+        log::info!("Restoring saved WIFI profiles after rollback");
+        let opt = NipartApplyOption::new().memory_only().no_verify();
+        self.plugin_manager
+            .apply_network_state(&wifi_state, &opt)
+            .await
     }
 
     async fn verify(
@@ -541,6 +586,32 @@ fn verify_dns(
         }
     }
     Ok(())
+}
+
+/// The subset of a saved state that hands the WIFI profiles back to the
+/// plugin after a rollback: the wifi-phy and every auto-connectable
+/// wifi-cfg profile.
+///
+/// `auto-connect: false` profiles are only activated by an explicit apply
+/// action and absent profiles were removed, so neither may come back
+/// implicitly.
+fn saved_wifi_restore_state(saved_state: &NetworkState) -> NetworkState {
+    let mut wifi_state = NetworkState::default();
+    for iface in saved_state.ifaces.iter() {
+        if iface.is_absent()
+            || iface.base_iface().auto_connect
+                == Some(InterfaceAutoConnect::Manual)
+        {
+            continue;
+        }
+        if matches!(
+            iface.iface_type(),
+            InterfaceType::WifiCfg | InterfaceType::WifiPhy
+        ) {
+            wifi_state.ifaces.push(iface.clone());
+        }
+    }
+    wifi_state
 }
 
 #[cfg(test)]

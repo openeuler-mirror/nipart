@@ -170,4 +170,8 @@ makes `npt wifi connect <SSID>` fail as soon as the scan finds it, with:
 
     NipartError: no-support: TKIP WPA2 is not supported
 
+The failed apply is rolled back and the saved WIFI profiles are handed
+back to the plugin, so the previous connection (or the best remaining
+saved network) comes back without a manual `npt up`.
+
 Reconfigure the AP to WPA2/WPA3 with AES (CCMP) to connect.

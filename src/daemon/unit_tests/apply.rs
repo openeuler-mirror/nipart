@@ -5,7 +5,7 @@ use nipart::{
     NetworkState, NipartInterface,
 };
 
-use super::pretend_config_is_saved;
+use super::{pretend_config_is_saved, saved_wifi_restore_state};
 
 const IFACE_YAML: &str = r#"---
     name: eth0
@@ -72,6 +72,52 @@ fn get_auto_connect(state: &NetworkState) -> Option<InterfaceAutoConnect> {
         .kernel_ifaces
         .get("eth0")
         .and_then(|iface| iface.base_iface().auto_connect.clone())
+}
+
+/// A failed partial `npt wifi connect` rollback must hand the saved WIFI
+/// profiles back to the plugin, otherwise shuli is left with no network
+/// and the previous connection does not come back until a manual
+/// `npt up`.
+#[test]
+fn test_saved_wifi_restore_state_keeps_up_wifi_profiles_only() {
+    let saved_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        interfaces:
+        - name: wlan0
+          kernel-iface-name: wlan0
+          type: wifi-phy
+          state: up
+        - name: Test-WIFI
+          type: wifi-cfg
+          state: up
+          wifi:
+            ssid: Test-WIFI
+        - name: Manual-WIFI
+          type: wifi-cfg
+          state: up
+          auto-connect: false
+          wifi:
+            ssid: Manual-WIFI
+        - name: Removed-WIFI
+          type: wifi-cfg
+          state: absent
+          wifi:
+            ssid: Removed-WIFI
+        - name: eth0
+          type: ethernet
+          state: up
+        "#,
+    )
+    .unwrap();
+
+    let restore = saved_wifi_restore_state(&saved_state);
+    let names: Vec<&str> =
+        restore.ifaces.iter().map(|iface| iface.name()).collect();
+    assert_eq!(
+        names,
+        ["wlan0", "Test-WIFI"],
+        "only the phy and auto-connectable wifi-cfg profiles may come back"
+    );
 }
 
 /// Re-applying an unchanged `auto-connect: false` config: the apply diff
