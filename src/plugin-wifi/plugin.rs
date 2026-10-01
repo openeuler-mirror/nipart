@@ -177,7 +177,7 @@ impl NipartPlugin for NipartPluginWifi {
 
     async fn apply_network_state(
         plugin: &Arc<Self>,
-        mut desired_state: NetworkState,
+        desired_state: NetworkState,
         _opt: NipartApplyOption,
         conn: &mut NipartIpcConnection,
     ) -> Result<(), NipartError> {
@@ -185,7 +185,14 @@ impl NipartPlugin for NipartPluginWifi {
             "WIFI plugin apply_network_state with state {desired_state}"
         ))
         .await;
-        let ifaces: Vec<Interface> = desired_state.ifaces.drain().collect();
+        // Preserve the incoming interface order (`insert_order`): the
+        // apply path compares the shuli network list built here with the
+        // plugin's current one, so draining the internal HashMaps would
+        // give every apply a random order, make an idempotent re-apply
+        // (e.g. the boot hand-off re-sending the saved wifi-cfg set) look
+        // like a change and reset an in-flight connection.
+        let ifaces: Vec<Interface> =
+            desired_state.ifaces.iter().cloned().collect();
         // Never block: enqueue the request to the dedicated apply worker
         // and return immediately. The daemon verification stage waits and
         // retries until the applied state matches the desired state.
