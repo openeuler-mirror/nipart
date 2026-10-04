@@ -183,6 +183,41 @@ fn test_event_is_interested_by_name_or_wifi() {
     assert!(!worker.event_is_interested(&gen_event("enp2s0")));
 }
 
+/// A wifi-phy associated while the monitor was paused must get its event
+/// re-emitted on resume: the dump carries no SSID to compare with the
+/// pre-pause snapshot, so the snapshot entry has to be invalidated.
+#[test]
+fn test_forget_paused_state_reemits_wifi_phy_event() {
+    let mut worker = gen_worker();
+    worker.paused_state =
+        Some(HashMap::from([("wlan0".to_string(), gen_last_state(true))]));
+    worker
+        .emited
+        .insert("wlan0".to_string(), gen_last_state(true));
+    let event = InterfaceLinkEvent::new(
+        "wlan0".to_string(),
+        10,
+        InterfaceType::WifiPhy,
+        true,
+        None,
+    );
+
+    // Without the forget command the SSID-less dump event is treated as
+    // unchanged and dropped.
+    assert!(!worker.emit_on_resume(&event));
+    assert!(worker.emited.contains_key("wlan0"));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(worker.process_cmd(NipartMonitorCmd::ForgetPausedState(vec![
+        "wlan0".to_string(),
+    ])))
+    .unwrap();
+
+    assert!(worker.emit_on_resume(&event));
+    // The up->up debounce would drop the event without this.
+    assert!(!worker.emited.contains_key("wlan0"));
+}
+
 #[test]
 fn test_should_pause_and_resume_include_mac_watch() {
     let mut worker = gen_worker();

@@ -5,7 +5,11 @@ use nipart::{
     NetworkState, NipartInterface,
 };
 
-use super::{pretend_config_is_saved, saved_wifi_restore_state};
+use super::{
+    WifiConnectGroup, WifiConnectRequest, pretend_config_is_saved,
+    saved_wifi_restore_state, wifi_connect_groups, wifi_connect_requests,
+    wifi_group_is_connected, wifi_phy_names,
+};
 
 const IFACE_YAML: &str = r#"---
     name: eth0
@@ -236,4 +240,151 @@ fn test_pretend_config_is_saved_removes_down_wifi_cfg() {
 
     assert!(!has_wifi_cfg(&post_apply));
     merged.verify(&post_apply).unwrap();
+}
+
+/// `npt wifi connect` and an explicit WIFI profile apply must wait for the
+/// association: only up `wifi-phy`/`wifi-cfg` interfaces carrying an SSID
+/// produce a connect request, a down profile or a non-wifi interface none.
+#[test]
+fn test_wifi_connect_requests_cover_phy_and_cfg_ssids() {
+    let mut merged = MergedNetworkState::default();
+    merged.desired = rmsd_yaml::from_str(
+        r#"---
+        interfaces:
+        - name: wlan0
+          type: wifi-phy
+          state: up
+          wifi:
+            ssid: Test-WIFI
+        - name: Test-WIFI-2
+          type: wifi-cfg
+          state: up
+          wifi:
+            ssid: Test-WIFI-2
+            base-iface: wlan0
+        - name: Test-WIFI-3
+          type: wifi-cfg
+          state: down
+          wifi:
+            ssid: Test-WIFI-3
+        - name: eth0
+          type: ethernet
+          state: up
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        wifi_connect_requests(&merged),
+        vec![
+            WifiConnectRequest {
+                ssid: "Test-WIFI".to_string(),
+                base_iface: Some("wlan0".to_string()),
+            },
+            WifiConnectRequest {
+                ssid: "Test-WIFI-2".to_string(),
+                base_iface: Some("wlan0".to_string()),
+            },
+        ]
+    );
+}
+
+/// Only the plugin's live connection state may satisfy a connect request:
+/// the kernel reports the SSID during association, before the 4-way
+/// handshake which a wrong password makes fail.
+#[test]
+fn test_wifi_group_is_connected_matches_live_iface_and_base() {
+    let live: NetworkState = rmsd_yaml::from_str(
+        r#"---
+        interfaces:
+        - name: wlan0
+          kernel-iface-name: wlan0
+          type: wifi-phy
+          state: up
+          wifi:
+            ssid: Test-WIFI
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(wifi_phy_names(&live), ["wlan0"]);
+    assert!(wifi_group_is_connected(
+        &live,
+        &WifiConnectGroup {
+            phy_name: Some("wlan0".to_string()),
+            base_iface: None,
+            ssids: vec!["Test-WIFI".to_string()],
+        }
+    ));
+    assert!(!wifi_group_is_connected(
+        &live,
+        &WifiConnectGroup {
+            phy_name: Some("wlan1".to_string()),
+            base_iface: None,
+            ssids: vec!["Test-WIFI".to_string()],
+        }
+    ));
+    assert!(!wifi_group_is_connected(
+        &live,
+        &WifiConnectGroup {
+            phy_name: None,
+            base_iface: None,
+            ssids: vec!["Other".to_string()],
+        }
+    ));
+}
+
+/// Several SSIDs on one phy are a best-network selection: one connected
+/// SSID satisfies the whole group, exactly like shuli picks one network
+/// from the plugin's list.
+#[test]
+fn test_wifi_connect_groups_allow_any_ssid_per_phy() {
+    let requests = vec![
+        WifiConnectRequest {
+            ssid: "Test-WIFI".to_string(),
+            base_iface: None,
+        },
+        WifiConnectRequest {
+            ssid: "Test-WIFI-2".to_string(),
+            base_iface: None,
+        },
+        WifiConnectRequest {
+            ssid: "Test-WIFI-3".to_string(),
+            base_iface: Some("wlan0".to_string()),
+        },
+        WifiConnectRequest {
+            ssid: "Test-WIFI-4".to_string(),
+            base_iface: Some("wlan1".to_string()),
+        },
+    ];
+    let groups = wifi_connect_groups(
+        &requests,
+        &["wlan0".to_string(), "wlan1".to_string()],
+    );
+
+    assert_eq!(
+        groups,
+        vec![
+            WifiConnectGroup {
+                phy_name: Some("wlan0".to_string()),
+                base_iface: None,
+                // Both unbound profiles bind to wlan0; the explicit
+                // wlan0 profile joins them.
+                ssids: vec![
+                    "Test-WIFI".to_string(),
+                    "Test-WIFI-2".to_string(),
+                    "Test-WIFI-3".to_string(),
+                ],
+            },
+            WifiConnectGroup {
+                phy_name: Some("wlan1".to_string()),
+                base_iface: None,
+                ssids: vec![
+                    "Test-WIFI".to_string(),
+                    "Test-WIFI-2".to_string(),
+                    "Test-WIFI-4".to_string(),
+                ],
+            },
+        ]
+    );
 }

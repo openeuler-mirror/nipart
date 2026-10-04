@@ -161,6 +161,25 @@ Query only property. The signal strength in dBm.
 
 Query only property. The signal strength as a percentage (0-100).
 
+## Connect verification
+
+An apply which explicitly requests a WIFI connection - `npt wifi connect
+<SSID>`, `npt up <wifi profile>`, or `npt apply` of a `wifi-phy`/`wifi-cfg`
+profile carrying an SSID - waits until the wifi plugin reports the
+association authenticated (the 4-way handshake completed) before returning.
+The command fails with the real reason when the connection cannot succeed,
+e.g. for a wrong password:
+
+    NipartError: authentication-error: wrong password for SSID 'Test-WIFI'
+
+A failed `npt wifi connect` is rolled back: the rejected profile is not
+persisted and the saved WIFI profiles are handed back to the plugin, so the
+previous connection (or the best remaining saved network) comes back without
+a manual `npt up`.
+
+Use `npt apply --no-verify` when the AP is not available yet: the profile is
+saved and the plugin keeps hunting for the AP in the background.
+
 ## Unsupported security
 
 Nipart refuses networks whose security mode shuli does not implement

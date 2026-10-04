@@ -247,9 +247,7 @@ impl TaskWorker for NipartPluginWorker {
                     if !plugin.is_wifi_plugin() {
                         continue;
                     }
-                    if let Err(e) = plugin.wifi_connect_error(&opt).await {
-                        return Err(e);
-                    }
+                    plugin.wifi_connect_error(&opt).await?;
                 }
                 Ok(NipartPluginReply::None)
             }

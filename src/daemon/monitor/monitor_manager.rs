@@ -307,6 +307,26 @@ impl NipartMonitorManager {
             .await?;
         Ok(())
     }
+
+    /// Tell the monitor that the given interfaces changed while it was
+    /// paused (e.g. a wifi-phy associated during an apply).
+    ///
+    /// The resume link dump carries no SSID to compare against the
+    /// pre-pause snapshot, so such a change would be treated as
+    /// unchanged and its event - which applies the `wifi-cfg` IP config
+    /// and routes - would be lost.
+    pub(crate) async fn forget_paused_state(
+        &mut self,
+        iface_names: &[String],
+    ) -> Result<(), NipartError> {
+        if iface_names.is_empty() {
+            return Ok(());
+        }
+        self.mgr
+            .exec(NipartMonitorCmd::ForgetPausedState(iface_names.to_vec()))
+            .await?;
+        Ok(())
+    }
 }
 
 fn wifi_monitor_is_needed(full_saved_state: &NetworkState) -> bool {

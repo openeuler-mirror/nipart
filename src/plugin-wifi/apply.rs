@@ -66,6 +66,25 @@ pub(crate) fn latched_connect_error(
         .map(|latched| latched.error.clone())
 }
 
+/// Map a fatal shuli connection error to the error a daemon wait should
+/// report.
+///
+/// `None` means shuli will keep retrying the connection and a wait must
+/// not fail on the error. The conditions worth latching are the ones
+/// where retrying is futile until the AP or the operator changes
+/// something: an unsupported security mode and rejected credentials
+/// (e.g. a wrong WIFI password).
+fn nipart_error_from_shuli(error: &shuli::WifiError) -> Option<NipartError> {
+    let kind = match error.kind {
+        shuli::ErrorKind::NoSupport => ErrorKind::NoSupport,
+        shuli::ErrorKind::WrongPassword | shuli::ErrorKind::AuthFailed => {
+            ErrorKind::AuthenticationError
+        }
+        _ => return None,
+    };
+    Some(NipartError::new(kind, error.msg.clone()))
+}
+
 /// Drop latched connection errors for the SSIDs a new apply carries.
 ///
 /// Called when the apply reaches the plugin (before the apply worker
@@ -243,11 +262,12 @@ impl WifiClientState {
             Ok(result) => result,
             Err(e) => {
                 // A persistent condition shuli already diagnosed (e.g.
-                // the AP's unsupported TKIP security) is latched so the
-                // daemon's connection wait can return it instead of
-                // timing out. The client keeps retrying in the
-                // background; a later success clears the latch.
-                if e.kind == shuli::ErrorKind::NoSupport {
+                // the AP's unsupported TKIP security or a wrong
+                // password) is latched so the daemon's connection wait
+                // can return it instead of timing out. The client keeps
+                // retrying in the background; a later success clears
+                // the latch.
+                if let Some(error) = nipart_error_from_shuli(&e) {
                     let iface_name = e.iface_name.clone().unwrap_or_default();
                     let ssid = e
                         .ssid
@@ -262,13 +282,7 @@ impl WifiClientState {
                     log::warn!("WIFI {iface_name} reports: {e}");
                     self.set_connect_error(
                         &iface_name,
-                        WifiConnectError {
-                            ssid,
-                            error: NipartError::new(
-                                ErrorKind::NoSupport,
-                                e.msg.clone(),
-                            ),
-                        },
+                        WifiConnectError { ssid, error },
                     );
                     return Ok(());
                 }
@@ -305,9 +319,26 @@ impl WifiClientState {
                 log::warn!("WIFI {iface_name} connection failed, retrying");
             }
             WifiState::FailedAuthentication => {
+                let ssid = client
+                    .current_ssid(iface_name)
+                    .unwrap_or_default()
+                    .to_string();
                 self.clear_live_iface(iface_name);
                 log::error!(
                     "WIFI {iface_name} authentication failed, retrying"
+                );
+                // Make the rejected credentials visible to the daemon's
+                // connection wait: retrying them is futile until the
+                // AP or the operator changes something.
+                self.set_connect_error(
+                    iface_name,
+                    WifiConnectError {
+                        ssid: ssid.clone(),
+                        error: NipartError::new(
+                            ErrorKind::AuthenticationError,
+                            format!("authentication failed for SSID '{ssid}'"),
+                        ),
+                    },
                 );
             }
             state => {
@@ -393,6 +424,13 @@ impl WifiClientState {
         // one (a transient `mac80211_hwsim` radio could otherwise take the
         // only slot and leave the real wifi-phy without the profile).
         let up_wifi_phys = up_wifi_phys(ifaces);
+        // An apply which only carries saved `wifi-cfg` profiles (e.g. the
+        // event worker handing the saved WIFI picture to the plugin when a
+        // new wifi-phy appears) brings up no phy name itself: fall back to
+        // every phy present in the kernel for unbound profiles.
+        let mut present_wifi_phys: Vec<String> =
+            wifi_phys_if_index.keys().cloned().collect();
+        present_wifi_phys.sort_unstable();
 
         for iface in ifaces {
             let wifi_cfg = match iface {
@@ -426,7 +464,12 @@ impl WifiClientState {
                 continue;
             };
             log::trace!("Applying {wifi_cfg}");
-            let phy_names = wifi_cfg_phy_names(iface, wifi_cfg, &up_wifi_phys);
+            let phy_names = wifi_cfg_phy_names(
+                iface,
+                wifi_cfg,
+                &up_wifi_phys,
+                &present_wifi_phys,
+            );
             if phy_names.is_empty() {
                 log::warn!(
                     "WifiCfg interface {} has no base_iface specified, no \
@@ -721,17 +764,25 @@ fn up_wifi_phys(ifaces: &[Interface]) -> Vec<String> {
 /// Kernel names of the wifi phys a desired wifi config targets:
 /// its own phy for a `wifi-phy`, the explicit `base-iface` for a bound
 /// `wifi-cfg`, or every eligible `wifi-phy` for an unbound `wifi-cfg`.
+///
+/// An unbound `wifi-cfg` normally targets the up wifi-phys carried by the
+/// same apply. An apply carrying none (e.g. the event worker handing the
+/// saved profiles to the plugin for a newly appeared phy) falls back to
+/// every present phy so the profile is not lost.
 fn wifi_cfg_phy_names(
     iface: &Interface,
     wifi_cfg: &WifiConfig,
     up_wifi_phys: &[String],
+    present_wifi_phys: &[String],
 ) -> Vec<String> {
     if iface.iface_type() == &InterfaceType::WifiPhy {
         vec![iface.kernel_iface_name().to_string()]
     } else if let Some(base_iface) = wifi_cfg.base_iface.as_ref() {
         vec![base_iface.clone()]
-    } else {
+    } else if !up_wifi_phys.is_empty() {
         up_wifi_phys.to_vec()
+    } else {
+        present_wifi_phys.to_vec()
     }
 }
 

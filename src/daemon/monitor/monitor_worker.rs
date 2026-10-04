@@ -161,6 +161,12 @@ pub(crate) enum NipartMonitorCmd {
     MarkExplicitlyDown(Vec<String>),
     /// Forget that an interface/profile was explicitly brought down.
     ClearExplicitlyDown(Vec<String>),
+    /// The daemon changed the given interfaces while the monitor was
+    /// paused (e.g. a wifi-phy associated during an apply).  Their event
+    /// must be emitted by the next resume link dump even though the dump
+    /// carries no SSID to compare against the pre-pause snapshot: the
+    /// event worker resolves the SSID from the current state itself.
+    ForgetPausedState(Vec<String>),
 }
 
 impl std::fmt::Display for NipartMonitorCmd {
@@ -201,6 +207,9 @@ impl std::fmt::Display for NipartMonitorCmd {
             }
             Self::ClearExplicitlyDown(ifaces) => {
                 write!(f, "clear-explicitly-down:{ifaces:?}")
+            }
+            Self::ForgetPausedState(ifaces) => {
+                write!(f, "forget-paused-state:{ifaces:?}")
             }
         }
     }
@@ -358,6 +367,23 @@ impl TaskWorker for NipartMonitorWorker {
             NipartMonitorCmd::ClearExplicitlyDown(names) => {
                 for name in names {
                     self.explicitly_down.remove(&name);
+                }
+            }
+            NipartMonitorCmd::ForgetPausedState(ifaces) => {
+                // Dropping the pre-pause snapshot of these interfaces
+                // makes the resume link dump treat them as unknown and
+                // emit their event. The last-known state must be dropped
+                // as well: the standard up->up dedup/debounce would
+                // otherwise silently drop the SSID-less dump event (the
+                // event worker resolves the new SSID from the current
+                // state itself).
+                if let Some(paused_state) = self.paused_state.as_mut() {
+                    for iface in &ifaces {
+                        paused_state.remove(iface);
+                    }
+                }
+                for iface in &ifaces {
+                    self.emited.remove(iface);
                 }
             }
         }

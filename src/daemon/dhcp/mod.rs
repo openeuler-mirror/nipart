@@ -23,6 +23,14 @@ use crate::plugin::NipartPluginManager;
 
 const WIFI_SSID_WAIT_TIMEOUT_SECS: u64 = 60;
 
+/// Whether a plugin-reported WIFI connection error means the connection
+/// cannot succeed by waiting (e.g. wrong password or unsupported
+/// security) and the daemon must fail the wait with that error instead
+/// of polling until the timeout.
+pub(crate) fn is_fatal_wifi_connect_error(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::NoSupport | ErrorKind::AuthenticationError)
+}
+
 /// Whether the apply changed the SSID of a wifi-phy.
 ///
 /// The link-up event path synthesizes a wifi-phy from a saved wifi-cfg to
@@ -168,15 +176,16 @@ pub(crate) async fn wait_wifi_ssid(
         + Duration::from_secs(WIFI_SSID_WAIT_TIMEOUT_SECS);
     loop {
         // A plugin-diagnosed failure (e.g. shuli: `NoSupport: TKIP WPA2
-        // is not supported`) fails the wait immediately with the real
-        // reason instead of polling until the timeout.
+        // is not supported`, or a wrong password) fails the wait
+        // immediately with the real reason instead of polling until the
+        // timeout.
         if let Err(e) = plugin_manager
             .wifi_connect_error(&NipartWifiConnectErrorOption::new(
                 iface_name, ssid,
             ))
             .await
         {
-            if e.kind() == ErrorKind::NoSupport {
+            if is_fatal_wifi_connect_error(e.kind()) {
                 return Err(e);
             }
             log::debug!(
