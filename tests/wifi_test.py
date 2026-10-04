@@ -10,6 +10,7 @@ multiple SSIDs, daemon restart auto-connect and AP/phy appearing later.
 import os
 import re
 import signal
+import subprocess
 import time
 
 import nipart
@@ -763,6 +764,83 @@ class TestWifiCfg:
         ), "Route by wifi-cfg profile name was not applied"
 
 
+def _wifi_connect(ssid, password):
+    """Run `npt wifi connect <ssid>` feeding `password` on STDIN."""
+    proc = subprocess.run(
+        [CLI_PATH, "wifi", "connect", ssid],
+        input=f"{password}\n".encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8"),
+        proc.stderr.decode("utf-8"),
+    )
+
+
+def _saved_wifi_cfg(ssid):
+    client = nipart.NipartClient()
+    state = client.query_network_state(nipart.NipartQueryOption.saved())
+    for iface in state["interfaces"]:
+        if iface.get("name") == ssid and iface.get("type") == "wifi-cfg":
+            return iface
+    return None
+
+
+@pytest.mark.skipif(
+    not has_kernel_module("mac80211_hwsim"),
+    reason="Does not have 'mac80211_hwsim' module",
+)
+class TestWifiConnectCommand:
+    @pytest.fixture(autouse=True)
+    def clean_up_connect_profile(self):
+        # Start from a clean profile: earlier test classes may have left
+        # a saved profile for the same SSID.
+        nipart.apply(load_yaml(f"""---
+            interfaces:
+              - name: {TEST_WIFI_SSID}
+                type: wifi-cfg
+                state: absent"""))
+        yield
+        nipart.apply(load_yaml(f"""---
+            interfaces:
+              - name: {TEST_WIFI_SSID}
+                type: wifi-cfg
+                state: absent"""))
+
+    def test_wrong_password_fails_and_rolls_back(
+        self, clean_up, wifi_env  # noqa: F811
+    ):
+        assert connected_ssid() != TEST_WIFI_SSID
+        rc, out, err = _wifi_connect(TEST_WIFI_SSID, "wrong-password")
+        assert rc != 0, (
+            "npt wifi connect accepted a wrong password:\n" f"{out}\n{err}"
+        )
+        assert "wrong password" in (out + err), (out, err)
+        assert (
+            connected_ssid() != TEST_WIFI_SSID
+        ), "the failed connection attempt was left associated"
+        # The failed profile must not be persisted: a saved profile
+        # would be retried in the background and at boot.
+        assert (
+            _saved_wifi_cfg(TEST_WIFI_SSID) is None
+        ), "the failed npt wifi connect profile was persisted"
+
+    def test_connect_waits_for_authenticated_link(
+        self, clean_up, wifi_env  # noqa: F811
+    ):
+        assert connected_ssid() != TEST_WIFI_SSID
+        rc, out, err = _wifi_connect(TEST_WIFI_SSID, TEST_WIFI_PSK)
+        assert rc == 0, f"npt wifi connect failed:\n{out}\n{err}"
+        # The command must not return before the plugin completed the
+        # association and the 4-way handshake.
+        assert (
+            connected_ssid() == TEST_WIFI_SSID
+        ), "npt wifi connect returned before the WIFI link was connected"
+        assert retry_till_true_or_timeout(10, ping_wifi_peer)
+
+
 @pytest.mark.skipif(
     not has_kernel_module("mac80211_hwsim"),
     reason="Does not have 'mac80211_hwsim' module",
@@ -993,13 +1071,20 @@ class TestWifiPhyLater:
             exec_cmd("modprobe -r mac80211_hwsim".split(), check=False)
             exec_cmd(f"ip netns del {TEST_NET_NS}".split(), check=False)
 
-            nipart.apply(load_yaml(f"""---
+            # The wifi-cfg profile is applied before any AP/phy exists: it
+            # is only saved, and the monitor/event worker connects it once
+            # the wifi-phy appears. Verification would wait for a
+            # connection which is not expected yet, so skip it.
+            nipart.apply(
+                load_yaml(f"""---
                     interfaces:
                       - name: {TEST_WIFI_SSID_OPEN}
                         type: wifi-cfg
                         state: up
                         wifi:
-                          ssid: {TEST_WIFI_SSID_OPEN}"""))
+                          ssid: {TEST_WIFI_SSID_OPEN}"""),
+                verify_change=False,
+            )
 
             client = nipart.NipartClient()
             saved_state = client.query_network_state(

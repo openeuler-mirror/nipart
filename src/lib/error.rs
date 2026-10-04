@@ -30,6 +30,8 @@ pub enum ErrorKind {
     Timeout,
     /// Not supported
     NoSupport,
+    /// Authentication failure, e.g. wrong WIFI password
+    AuthenticationError,
     /// Plugin failure
     PluginFailure,
     /// Daemon failure

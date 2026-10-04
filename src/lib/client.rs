@@ -78,6 +78,10 @@ impl NipartClient {
     // Explicit up/down actions may wait for WIFI association and DHCP lease
     // acquisition, which can exceed the default 30 second IPC timeout.
     const IFACE_ACTION_IPC_TIMEOUT_MS: u32 = 10 * 60 * 1000;
+    // An apply can wait for WIFI association (e.g. `npt wifi connect` or
+    // `npt apply` of a wifi profile) and DHCP, which may exceed the
+    // default 30 second IPC timeout; the daemon's own waits are bounded.
+    const APPLY_IPC_TIMEOUT_MS: u32 = 10 * 60 * 1000;
 
     /// Create IPC connect to nipart daemon
     pub async fn new() -> Result<Self, NipartError> {
@@ -115,13 +119,17 @@ impl NipartClient {
         desired_state: NetworkState,
         option: NipartApplyOption,
     ) -> Result<NetworkState, NipartError> {
+        let original_timeout = self.ipc.timeout_ms;
+        self.ipc.set_timeout(Self::APPLY_IPC_TIMEOUT_MS);
         self.ipc
             .send(Ok(NipartClientCmd::ApplyNetworkState(Box::new((
                 desired_state,
                 option,
             )))))
             .await?;
-        self.ipc.recv::<NetworkState>().await
+        let ret = self.ipc.recv::<NetworkState>().await;
+        self.ipc.set_timeout(original_timeout);
+        ret
     }
 
     pub async fn up_interface(

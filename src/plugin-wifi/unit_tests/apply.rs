@@ -75,6 +75,34 @@ fn latched_connect_error_matches_iface_and_ssid() {
 }
 
 #[test]
+fn fatal_shuli_errors_are_mapped_for_the_daemon_wait() {
+    use shuli::ErrorKind as ShuliErrorKind;
+
+    let err = nipart_error_from_shuli(&shuli::WifiError::new(
+        ShuliErrorKind::WrongPassword,
+        "wrong password for SSID 'Test-WIFI'",
+    ))
+    .expect("a wrong password must be latched");
+    assert_eq!(err.kind(), ErrorKind::AuthenticationError);
+
+    let err = nipart_error_from_shuli(&shuli::WifiError::new(
+        ShuliErrorKind::NoSupport,
+        "TKIP WPA2 is not supported",
+    ))
+    .expect("unsupported security must be latched");
+    assert_eq!(err.kind(), ErrorKind::NoSupport);
+
+    assert!(
+        nipart_error_from_shuli(&shuli::WifiError::new(
+            ShuliErrorKind::Nl80211,
+            "transient netlink error",
+        ))
+        .is_none(),
+        "transient errors must not fail a connection wait"
+    );
+}
+
+#[test]
 fn connect_error_latch_is_cleared_for_new_attempt_and_restart() {
     let errors = wifi_errors();
     let enabled_flag = Arc::new(AtomicBool::new(true));
@@ -439,14 +467,20 @@ fn unbound_wifi_cfg_targets_every_up_wifi_phy() {
     let up_phys = vec!["wlan0".to_string(), "wlan1".to_string()];
     let (iface, cfg) = cfg_iface("Test-WIFI", None);
 
-    assert_eq!(wifi_cfg_phy_names(&iface, &cfg, &up_phys), up_phys);
+    assert_eq!(wifi_cfg_phy_names(&iface, &cfg, &up_phys, &[]), up_phys);
 }
 
 #[test]
-fn unbound_wifi_cfg_without_phy_targets_none() {
+fn unbound_wifi_cfg_falls_back_to_present_phys() {
     let (iface, cfg) = cfg_iface("Test-WIFI", None);
 
-    assert!(wifi_cfg_phy_names(&iface, &cfg, &[]).is_empty());
+    assert!(wifi_cfg_phy_names(&iface, &cfg, &[], &[]).is_empty());
+    // An apply carrying only saved profiles (e.g. the new-wifi-phy
+    // event) still binds the profile to the present phys.
+    assert_eq!(
+        wifi_cfg_phy_names(&iface, &cfg, &[], &["wlan0".to_string()]),
+        vec!["wlan0".to_string()]
+    );
 }
 
 #[test]
@@ -455,11 +489,11 @@ fn bound_wifi_cfg_targets_base_iface_only() {
     let (iface, cfg) = cfg_iface("Test-WIFI", Some("wlan1"));
 
     assert_eq!(
-        wifi_cfg_phy_names(&iface, &cfg, &up_phys),
+        wifi_cfg_phy_names(&iface, &cfg, &up_phys, &[]),
         vec!["wlan1".to_string()]
     );
     assert_eq!(
-        wifi_cfg_phy_names(&iface, &cfg, &[]),
+        wifi_cfg_phy_names(&iface, &cfg, &[], &["wlan0".to_string()]),
         vec!["wlan1".to_string()]
     );
 }
@@ -470,7 +504,7 @@ fn wifi_phy_targets_its_own_kernel_name() {
     let cfg = wifi_cfg("Test-WIFI", None);
 
     assert_eq!(
-        wifi_cfg_phy_names(&iface, &cfg, &["wlan1".to_string()]),
+        wifi_cfg_phy_names(&iface, &cfg, &["wlan1".to_string()], &[]),
         vec!["wlan0".to_string()]
     );
 }

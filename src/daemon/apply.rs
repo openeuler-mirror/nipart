@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use nipart::{
     DnsResolver, ErrorKind, Interface, InterfaceAutoConnect, InterfaceType,
     MergedNetworkState, NetworkState, NipartApplyOption, NipartError,
-    NipartInterface, NipartIpcConnection, NipartNoDaemon,
+    NipartInterface, NipartIpcConnection, NipartNoDaemon, NipartQueryOption,
+    NipartWifiConnectErrorOption,
 };
 
-use super::commander::NipartCommander;
+use super::{commander::NipartCommander, dhcp::is_fatal_wifi_connect_error};
 use crate::{log_debug, log_error, log_info, log_trace, log_warn};
 
 const RETRY_COUNT: usize = 10;
@@ -16,6 +19,216 @@ const RETRY_COUNT: usize = 10;
 // before verification gives up.
 const WIFI_RETRY_COUNT: usize = 60;
 const RETRY_INTERVAL_MS: u64 = 500;
+// A `npt wifi connect` must not return before the association completed:
+// bound the wait for the explicitly requested SSIDs. Failures the plugin
+// already diagnosed (wrong password, unsupported security) end the wait
+// immediately.
+const WIFI_CONNECT_WAIT_TIMEOUT_SECS: u64 = 60;
+
+/// A WIFI association explicitly requested by an apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WifiConnectRequest {
+    ssid: String,
+    /// `base-iface` of the request: the kernel or profile name of the
+    /// wifi-phy to bind to; `None` means any eligible wifi-phy.
+    base_iface: Option<String>,
+}
+
+/// The SSIDs one wifi-phy is asked to connect to.
+///
+/// The wifi plugin hands a phy's whole network list to shuli, which picks
+/// the best available network: a phy carrying several requested SSIDs is
+/// satisfied when at least one of them is connected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WifiConnectGroup {
+    /// Kernel name of the target phy when it is present; `None` when the
+    /// request's `base-iface` is a profile name and has to be matched
+    /// against the live phy at check time.
+    phy_name: Option<String>,
+    base_iface: Option<String>,
+    ssids: Vec<String>,
+}
+
+/// Kernel name of the wifi-phy a desired `wifi-phy` interface resolves
+/// to.
+///
+/// The desired state is the raw user input: a MAC-identified profile
+/// keeps its logical name there, so look up the resolved kernel name
+/// through the merged interfaces before falling back to the raw
+/// `kernel-iface-name`/name.
+fn wifi_phy_kernel_name(
+    merged_state: &MergedNetworkState,
+    iface: &Interface,
+) -> Option<String> {
+    for merged_iface in merged_state.ifaces.kernel_ifaces.values() {
+        if merged_iface.desired.as_ref().map(|desired| desired.name())
+            != Some(iface.name())
+            || merged_iface.merged.iface_type() != &InterfaceType::WifiPhy
+        {
+            continue;
+        }
+        let kernel_name = merged_iface.merged.kernel_iface_name();
+        if !kernel_name.is_empty() {
+            return Some(kernel_name.to_string());
+        }
+    }
+    if iface.kernel_iface_name().is_empty() {
+        Some(iface.name().to_string())
+    } else {
+        Some(iface.kernel_iface_name().to_string())
+    }
+}
+
+/// Collect the WIFI SSIDs this apply explicitly asks to connect to.
+///
+/// Only up `wifi-phy`/`wifi-cfg` interfaces carrying an SSID count: an
+/// apply without a WIFI connection request (e.g. an IP-only re-apply of
+/// an already connected phy, or a removal) must not wait for anything.
+fn wifi_connect_requests(
+    merged_state: &MergedNetworkState,
+) -> Vec<WifiConnectRequest> {
+    let mut ret = Vec::new();
+    for iface in merged_state.desired.ifaces.iter() {
+        if !iface.is_up() {
+            continue;
+        }
+        match iface {
+            Interface::WifiPhy(phy) => {
+                if let Some(ssid) = phy.ssid().filter(|ssid| !ssid.is_empty()) {
+                    ret.push(WifiConnectRequest {
+                        ssid: ssid.to_string(),
+                        base_iface: wifi_phy_kernel_name(merged_state, iface),
+                    });
+                }
+            }
+            Interface::WifiCfg(cfg) => {
+                if let Some(ssid) = cfg.ssid().filter(|ssid| !ssid.is_empty()) {
+                    ret.push(WifiConnectRequest {
+                        ssid: ssid.to_string(),
+                        base_iface: cfg
+                            .wifi
+                            .as_ref()
+                            .and_then(|wifi| wifi.base_iface.clone()),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    ret
+}
+
+/// Group the connect requests by the wifi-phy they target.
+///
+/// An unbound request (no `base-iface`) is handed to every present
+/// wifi-phy, exactly like the wifi plugin binds it. A `base-iface`
+/// matching a present kernel name selects that phy; an unresolved one
+/// (e.g. a profile name) is matched against the live state later.
+fn wifi_connect_groups(
+    requests: &[WifiConnectRequest],
+    phy_names: &[String],
+) -> Vec<WifiConnectGroup> {
+    let mut groups: Vec<WifiConnectGroup> = Vec::new();
+    let mut push = |phy_name: Option<String>,
+                    base_iface: Option<String>,
+                    ssid: &str| {
+        // A resolved phy is the group identity even when the requests
+        // reached it through different `base-iface` values (an unbound
+        // profile is handed to every phy).
+        let existing = groups.iter_mut().find(|group| match &phy_name {
+            Some(phy_name) => group.phy_name.as_ref() == Some(phy_name),
+            None => group.phy_name.is_none() && group.base_iface == base_iface,
+        });
+        if let Some(group) = existing {
+            if !group.ssids.iter().any(|existing| existing == ssid) {
+                group.ssids.push(ssid.to_string());
+            }
+        } else {
+            groups.push(WifiConnectGroup {
+                phy_name,
+                base_iface,
+                ssids: vec![ssid.to_string()],
+            });
+        }
+    };
+    for request in requests {
+        match request.base_iface.as_deref() {
+            None => {
+                for phy_name in phy_names {
+                    push(Some(phy_name.clone()), None, &request.ssid);
+                }
+            }
+            Some(base) => match phy_names.iter().find(|phy| *phy == base) {
+                Some(phy_name) => push(
+                    Some(phy_name.clone()),
+                    Some(base.to_string()),
+                    &request.ssid,
+                ),
+                None => push(None, Some(base.to_string()), &request.ssid),
+            },
+        }
+    }
+    groups
+}
+
+/// Whether `group` is satisfied by the plugin's live connection state.
+fn wifi_group_is_connected(
+    state: &NetworkState,
+    group: &WifiConnectGroup,
+) -> bool {
+    state.ifaces.iter().any(|iface| {
+        let Interface::WifiPhy(phy) = iface else {
+            return false;
+        };
+        if !group
+            .ssids
+            .iter()
+            .any(|ssid| phy.ssid() == Some(ssid.as_str()))
+        {
+            return false;
+        }
+        match (&group.phy_name, group.base_iface.as_deref()) {
+            (Some(phy_name), _) => phy.kernel_iface_name() == phy_name,
+            (None, Some(base)) => {
+                base == phy.kernel_iface_name()
+                    || base == phy.name()
+                    || phy.base_iface().profile_name.as_deref() == Some(base)
+            }
+            (None, None) => true,
+        }
+    })
+}
+
+/// Kernel names and SSIDs of the wifi-phys a state reports connected.
+fn connected_wifi_phys(state: &NetworkState) -> HashSet<(String, String)> {
+    let mut ret = HashSet::new();
+    for iface in state.ifaces.iter() {
+        if let Interface::WifiPhy(phy) = iface
+            && let Some(ssid) = phy.ssid()
+        {
+            ret.insert((
+                iface.kernel_iface_name().to_string(),
+                ssid.to_string(),
+            ));
+        }
+    }
+    ret
+}
+
+/// Kernel names of every wifi-phy in `state`.
+fn wifi_phy_names(state: &NetworkState) -> Vec<String> {
+    let mut ret = Vec::new();
+    for iface in state.ifaces.iter() {
+        let name = iface.kernel_iface_name();
+        if iface.iface_type() == &InterfaceType::WifiPhy
+            && !name.is_empty()
+            && !ret.iter().any(|existing| existing == name)
+        {
+            ret.push(name.to_string());
+        }
+    }
+    ret
+}
 
 /// DNS resolver state captured before an apply, used by rollback.
 #[derive(Debug, Clone)]
@@ -340,6 +553,20 @@ impl NipartCommander {
             .apply_network_state(&apply_state, &merged_state.option)
             .await?;
 
+        // An explicit WIFI connect request must not be reported as
+        // applied before the association finished: the generic
+        // verification cannot see a `wifi-cfg` profile (it is
+        // userspace-only and the post-apply state is synthesized from the
+        // saved config), so a wrong password would otherwise surface only
+        // as a background retry loop while the apply reports success. A
+        // failure here triggers the normal rollback.
+        if !merged_state.option.no_verify {
+            self.wait_wifi_connect_requests(&wifi_connect_requests(
+                merged_state,
+            ))
+            .await?;
+        }
+
         self.dhcpv4_manager
             .apply_dhcp_config(
                 conn.as_deref_mut(),
@@ -390,6 +617,163 @@ impl NipartCommander {
             }
         }
         result
+    }
+
+    /// Wait until every WIFI SSID this apply explicitly requested is
+    /// connected.
+    ///
+    /// Only the wifi plugin's live connection state counts: the kernel
+    /// reports the SSID as soon as the association completed, which
+    /// happens before the 4-way handshake, so a wrong password would
+    /// otherwise look connected during the failed handshake. While
+    /// waiting, the plugin's latched connection errors are polled so a
+    /// wrong password or an unsupported security fails the apply with
+    /// the real reason instead of a timeout.
+    async fn wait_wifi_connect_requests(
+        &mut self,
+        requests: &[WifiConnectRequest],
+    ) -> Result<(), NipartError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        // A profile applied before any wifi-phy exists (e.g. boot config
+        // for a hot-plugged NIC) is only saved: the plugin has no device
+        // to connect on, and the monitor worker hands the profile to the
+        // plugin when the phy appears later. Waiting here would fail the
+        // apply for a connection which is not expected yet.
+        let kernel_state =
+            NipartNoDaemon::query_network_state(NipartQueryOption::running())
+                .await?;
+        let phy_names = wifi_phy_names(&kernel_state);
+        if phy_names.is_empty() {
+            log::debug!(
+                "No WIFI phy present, skipping the WIFI connection wait"
+            );
+            return Ok(());
+        }
+        let groups = wifi_connect_groups(requests, &phy_names);
+        let initial_state = self.wifi_plugin_live_state(&kernel_state).await?;
+        let initial_connected = connected_wifi_phys(&initial_state);
+        log::debug!(
+            "Waiting for WIFI connection to {:?}",
+            requests.iter().map(|r| &r.ssid).collect::<Vec<_>>()
+        );
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(WIFI_CONNECT_WAIT_TIMEOUT_SECS);
+        loop {
+            let kernel_state = NipartNoDaemon::query_network_state(
+                NipartQueryOption::running(),
+            )
+            .await?;
+            let live_state = self.wifi_plugin_live_state(&kernel_state).await?;
+            let pending: Vec<&WifiConnectGroup> = groups
+                .iter()
+                .filter(|group| !wifi_group_is_connected(&live_state, group))
+                .collect();
+            if pending.is_empty() {
+                // The association happened while the monitor was paused:
+                // its resume link dump carries no SSID, so the monitor
+                // would drop the event as "unchanged" and the wifi-cfg
+                // IP and routes would never be applied. Ask it to emit
+                // the event for the phys this apply connected.
+                self.forget_changed_wifi_phys(&initial_connected, &live_state)
+                    .await?;
+                return Ok(());
+            }
+            for group in &pending {
+                let candidates: Vec<&String> = match group.phy_name.as_ref() {
+                    Some(phy_name) => vec![phy_name],
+                    None => phy_names.iter().collect(),
+                };
+                for phy_name in candidates {
+                    for ssid in &group.ssids {
+                        if let Err(e) = self
+                            .plugin_manager
+                            .wifi_connect_error(
+                                &NipartWifiConnectErrorOption::new(
+                                    phy_name, ssid,
+                                ),
+                            )
+                            .await
+                        {
+                            if is_fatal_wifi_connect_error(e.kind()) {
+                                return Err(e);
+                            }
+                            log::debug!(
+                                "wifi connection error query on \
+                                 {phy_name}/{ssid}: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(NipartError::new(
+                    ErrorKind::Timeout,
+                    format!(
+                        "Timed out waiting for WIFI connection to {}",
+                        pending
+                            .iter()
+                            .map(|group| format!(
+                                "SSID '{}'",
+                                group.ssids.join("' or '")
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                RETRY_INTERVAL_MS,
+            ))
+            .await;
+        }
+    }
+
+    /// The wifi plugin's live connection state, merged into one
+    /// `NetworkState`.
+    async fn wifi_plugin_live_state(
+        &mut self,
+        kernel_state: &NetworkState,
+    ) -> Result<NetworkState, NipartError> {
+        let mut live_state = NetworkState::default();
+        for plugin_state in self
+            .plugin_manager
+            .query_network_state(NipartQueryOption::running(), kernel_state)
+            .await?
+        {
+            live_state.merge(&plugin_state)?;
+        }
+        Ok(live_state)
+    }
+
+    /// Tell the monitor which wifi-phys this apply connected.
+    ///
+    /// The monitor was paused while the plugin connected, so its resume
+    /// link dump cannot tell the SSID changed (the dump carries no
+    /// SSID). Without this the event would be dropped as unchanged and
+    /// the `wifi-cfg` IP config and routes would never be applied.
+    async fn forget_changed_wifi_phys(
+        &mut self,
+        initial_connected: &HashSet<(String, String)>,
+        current: &NetworkState,
+    ) -> Result<(), NipartError> {
+        let mut changed_phys: Vec<String> = connected_wifi_phys(current)
+            .difference(initial_connected)
+            .map(|(iface_name, _)| iface_name.clone())
+            .collect();
+        changed_phys.sort_unstable();
+        changed_phys.dedup();
+        if !changed_phys.is_empty() {
+            log::debug!(
+                "WIFI associated while monitor paused, requesting link events \
+                 for {changed_phys:?}"
+            );
+            self.monitor_manager
+                .forget_paused_state(&changed_phys)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Apply DNS resolver configuration: `/etc/resolv.conf` and the DNS

@@ -153,7 +153,9 @@ sudo npt wifi scan
 ### Connect to WIFI
 
 ```bash
-# This command will ask you to input your wifi password
+# This command will ask you to input your wifi password. It waits until the
+# WIFI link is authenticated and fails - rolling back the profile - when the
+# password is wrong.
 sudo npt wifi connect <SSID>
 ```
 
