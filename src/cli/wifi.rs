@@ -32,8 +32,10 @@ impl CommandWifi {
 
     pub(crate) fn new_cmd() -> clap::Command {
         clap::Command::new("wifi")
-            .about("WIFI actions")
-            .subcommand_required(true)
+            .about(
+                "WIFI actions: without subcommand, show the scan results \
+                 stored in kernel",
+            )
             .subcommand(
                 clap::Command::new("scan")
                     .about("WIFI active scan")
@@ -93,43 +95,14 @@ impl CommandWifi {
         matches: &clap::ArgMatches,
     ) -> Result<(), CliError> {
         if let Some(matches) = matches.subcommand_matches("scan") {
-            let mut cli = NipartClient::new().await?;
-            let mut opt = NipartWifiScanOption::default();
+            let mut opt = NipartWifiScanOption::new();
             opt.iface_name = matches.get_one::<String>("IFACE").cloned();
             opt.hidden_ssids = matches
                 .get_many::<String>("WITH_HIDDEN")
                 .unwrap_or_default()
                 .cloned()
                 .collect();
-            let active_ssids = match cli
-                .query_network_state(NipartQueryOption::running())
-                .await
-            {
-                Ok(net_state) => collect_active_ssids(&net_state),
-                Err(e) => {
-                    log::warn!(
-                        "Failed to query network state for active SSID \
-                         markers: {e}"
-                    );
-                    HashSet::new()
-                }
-            };
-            let mut wifi_cfgs = cli.wifi_scan(opt).await?;
-            wifi_cfgs.sort_unstable_by_key(|wifi_cfg| wifi_cfg.signal_percent);
-            wifi_cfgs.reverse();
-            if matches.get_flag("YAML") {
-                println!("{}", rmsd_yaml::to_string(&wifi_cfgs)?);
-            } else {
-                let table = wifi_scan_table(&wifi_cfgs, &active_ssids);
-                print!(
-                    "{}",
-                    colorize_wifi_scan_table(
-                        &table,
-                        &wifi_cfgs,
-                        color_enabled(),
-                    )
-                );
-            }
+            show_scan_result(opt, matches.get_flag("YAML")).await?;
         } else if let Some(matches) = matches.subcommand_matches("connect") {
             // It is safe to unwrap because of clap `required: true`
             let ssid = matches.get_one::<String>("SSID").unwrap();
@@ -184,9 +157,46 @@ impl CommandWifi {
             let mut cli = NipartClient::new().await?;
             cli.wifi_control(NipartWifiControl::On).await?;
             println!("WIFI is on");
+        } else {
+            // `npt wifi` without subcommand dumps the scan results the
+            // kernel already has instead of triggering a new scan.
+            show_scan_result(NipartWifiScanOption::dump(), false).await?;
         }
         Ok(())
     }
+}
+
+/// Query the daemon for WIFI scan results (active scan or kernel dump)
+/// and show them in the `npt wifi scan` table/YAML format.
+async fn show_scan_result(
+    opt: NipartWifiScanOption,
+    yaml: bool,
+) -> Result<(), CliError> {
+    let mut cli = NipartClient::new().await?;
+    let active_ssids =
+        match cli.query_network_state(NipartQueryOption::running()).await {
+            Ok(net_state) => collect_active_ssids(&net_state),
+            Err(e) => {
+                log::warn!(
+                    "Failed to query network state for active SSID markers: \
+                     {e}"
+                );
+                HashSet::new()
+            }
+        };
+    let mut wifi_cfgs = cli.wifi_scan(opt).await?;
+    wifi_cfgs.sort_unstable_by_key(|wifi_cfg| wifi_cfg.signal_percent);
+    wifi_cfgs.reverse();
+    if yaml {
+        println!("{}", rmsd_yaml::to_string(&wifi_cfgs)?);
+    } else {
+        let table = wifi_scan_table(&wifi_cfgs, &active_ssids);
+        print!(
+            "{}",
+            colorize_wifi_scan_table(&table, &wifi_cfgs, color_enabled())
+        );
+    }
+    Ok(())
 }
 
 /// Build an `nmcli device wifi list`-style table from scan results.

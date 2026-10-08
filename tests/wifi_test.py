@@ -629,6 +629,35 @@ class TestWifi:
                       dhcp: true"""))
         assert retry_till_true_or_timeout(5, ping_wifi_peer)
 
+    def test_wifi_scan_dump_without_subcommand(self, wifi_env):  # noqa: F811
+        # `npt wifi` without argument dumps the scan results the kernel
+        # already has (like `iw dev <iface> scan dump`) in the same
+        # output format as `npt wifi scan`.
+        exec_cmd([npt_path(), "wifi", "scan"])
+        rc, out, err = exec_cmd([npt_path(), "wifi"], check=False)
+        assert rc == 0, f"npt wifi failed:\n{out}\n{err}"
+        assert "IN-USE" in out, out
+        assert "SSID" in out, out
+        assert "SECURITY" in out, out
+        assert TEST_WIFI_SSID in out, out
+
+        # Dumping the kernel scan results needs no root permission: only
+        # triggering a new scan does.
+        npt_as_nobody = [
+            "setpriv",
+            "--reuid=65534",
+            "--regid=65534",
+            "--clear-groups",
+            npt_path(),
+            "wifi",
+        ]
+        rc, out, err = exec_cmd(npt_as_nobody, check=False)
+        assert rc == 0, f"npt wifi as non-root failed:\n{out}\n{err}"
+        assert TEST_WIFI_SSID in out, out
+        rc, _, err = exec_cmd([*npt_as_nobody, "scan"], check=False)
+        assert rc != 0, "npt wifi scan should require root permission"
+        assert "root permission" in err, err
+
     def test_wifi_off_scan_fails_and_up_restores(
         self, clean_up, wifi_env  # noqa: F811
     ):

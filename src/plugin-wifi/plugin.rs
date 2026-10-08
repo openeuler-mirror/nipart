@@ -249,9 +249,14 @@ impl NipartPlugin for NipartPluginWifi {
         let NipartWifiScanOption {
             iface_name,
             hidden_ssids,
+            dump,
             ..
         } = opt;
-        NipartWpaConn::wifi_scan(iface_name.as_deref(), hidden_ssids).await
+        if dump {
+            NipartWpaConn::wifi_scan_dump(iface_name.as_deref()).await
+        } else {
+            NipartWpaConn::wifi_scan(iface_name.as_deref(), hidden_ssids).await
+        }
     }
 
     async fn wifi_control(

@@ -146,7 +146,11 @@ sudo npt show --iface route
 ### Scan WIFI networks
 
 ```bash
+# Trigger a new scan
 sudo npt wifi scan
+# Show the scan results already stored in the kernel (no new scan,
+# no root permission required)
+npt wifi
 ```
 
 ### Connect to WIFI

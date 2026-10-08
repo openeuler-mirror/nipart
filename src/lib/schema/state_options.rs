@@ -136,11 +136,28 @@ pub struct NipartWifiScanOption {
     /// added as well.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_ssids: Vec<String>,
+    /// Dump the scan results already stored in the kernel instead of
+    /// triggering a new scan (the `iw dev <iface> scan dump`
+    /// equivalent).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dump: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl NipartWifiScanOption {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Dump the kernel's cached scan results instead of scanning.
+    pub fn dump() -> Self {
+        Self {
+            dump: true,
+            ..Default::default()
+        }
     }
 }
 

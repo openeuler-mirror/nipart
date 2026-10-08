@@ -261,6 +261,18 @@ fn permission_check(
                     Ok(())
                 }
             }
+            // Dumping the scan results already stored in the kernel is a
+            // read-only operation; only triggering a new scan needs root.
+            NipartClientCmd::WifiScan(s) => {
+                if s.dump {
+                    Ok(())
+                } else {
+                    Err(NipartError::new(
+                        ErrorKind::PermissionDeny,
+                        "WIFI active scan requires root permission".into(),
+                    ))
+                }
+            }
             _ => Err(NipartError::new(
                 ErrorKind::PermissionDeny,
                 format!("Command {command} need to root permission"),
@@ -268,3 +280,7 @@ fn permission_check(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "unit_tests/api.rs"]
+mod tests;
