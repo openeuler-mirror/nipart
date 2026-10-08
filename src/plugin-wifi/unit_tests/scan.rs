@@ -74,8 +74,41 @@ fn test_detect_auth_type_wpa1_vendor_ie() {
 }
 
 #[test]
-fn test_signal_mbm_to_dbm() {
-    assert_eq!(signal_mbm_to_dbm(-3000), -30);
-    assert_eq!(signal_mbm_to_dbm(-4500), -45);
-    assert_eq!(signal_mbm_to_dbm(-6500), -65);
+fn test_merge_scan_results_keeps_signal_dbm() {
+    // shuli reports `BssInfo::signal_dbm` in dBm already, the scan
+    // result must not scale it down again.
+    let ies = [0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
+    let mut bss = BssInfo::default();
+    bss.bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    bss.freq_mhz = 2412;
+    bss.signal_dbm = -55;
+    let mut ret = HashMap::new();
+    merge_scan_results(&mut ret, "wlan0", &[(bss, ies.to_vec())], None);
+    let result = ret.get("hello").unwrap();
+    assert_eq!(result.signal_dbm, Some(-55));
+    assert_eq!(
+        result.signal_percent,
+        Some(WifiConfig::signal_dbm_to_percent(-55))
+    );
+}
+
+#[test]
+fn test_scan_dump_reports_hidden_bss() {
+    // A kernel scan dump (`hidden_ssids: None`) reports hidden BSSes
+    // whose SSID is cached, while an active scan without probing skips
+    // them.
+    let ies = [0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
+    let mut bss = BssInfo::default();
+    bss.bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    bss.freq_mhz = 2412;
+    bss.signal_dbm = -55;
+    bss.hidden = true;
+
+    let mut ret = HashMap::new();
+    merge_scan_results(&mut ret, "wlan0", &[(bss.clone(), ies.to_vec())], None);
+    assert!(ret.contains_key("hello"));
+
+    let mut ret = HashMap::new();
+    merge_scan_results(&mut ret, "wlan0", &[(bss, ies.to_vec())], Some(&[]));
+    assert!(ret.is_empty());
 }

@@ -7,6 +7,7 @@ use nipart::{
     WifiScanResult,
 };
 use rtnetlink::packet_core::Parseable;
+use shuli::BssInfo;
 use wl_nl80211::{
     Ieee80211AkmSuite, Ieee80211CipherSuite, Ieee80211Element,
     Ieee80211Elements,
@@ -27,49 +28,46 @@ impl NipartWpaConn {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         _wifi_scan(iface_name, hidden_ssids).await
     }
+
+    /// Dump the scan results already stored in the kernel without
+    /// triggering a new scan - the `iw dev <iface> scan dump`
+    /// equivalent, used by `npt wifi`.
+    pub(crate) async fn wifi_scan_dump(
+        iface_name: Option<&str>,
+    ) -> Result<Vec<WifiScanResult>, NipartError> {
+        let (scan_ifaces, _connected_ssids) = wifi_ifaces(iface_name).await?;
+        let mut ret: HashMap<String, WifiScanResult> = HashMap::new();
+        for iface_name in &scan_ifaces {
+            let scan_results = shuli::WifiClient::get_scan_result(iface_name)
+                .await
+                .map_err(|e| {
+                    NipartError::new(
+                        ErrorKind::PluginFailure,
+                        format!("scan dump failed on {iface_name}: {e}"),
+                    )
+                })?;
+            merge_scan_results(&mut ret, iface_name, &scan_results, None);
+        }
+        Ok(sorted_scan_results(ret))
+    }
 }
 
 async fn _wifi_scan(
     iface_name: Option<&str>,
     mut hidden_ssids: Vec<String>,
 ) -> Result<Vec<WifiScanResult>, NipartError> {
-    // Keep one entry per SSID, merging auth types from all BSSes of the
-    // same SSID and keeping the strongest signal.
-    let mut ret: HashMap<String, WifiScanResult> = HashMap::new();
-
-    let mut filter = nispor::NetStateFilter::minimum();
-    filter.iface = Some(nispor::NetStateIfaceFilter::minimum());
-    let np_state =
-        nispor::NetState::retrieve_with_filter_async(&filter).await?;
-
-    let mut wifi_phys: Vec<&str> = Vec::new();
-    for np_iface in np_state.ifaces.values() {
-        if np_iface.iface_type != nispor::IfaceType::Wifi {
-            continue;
-        }
-        wifi_phys.push(np_iface.name.as_str());
-        // Also probe the SSID we are currently connected to, so a hidden
-        // network we are attached to still appears in the results.
-        if let Some(ssid) = np_iface.wifi.as_ref().and_then(|w| w.ssid.clone())
-            && !ssid.is_empty()
-            && !hidden_ssids.contains(&ssid)
-        {
+    let (scan_ifaces, connected_ssids) = wifi_ifaces(iface_name).await?;
+    // Also probe the SSID we are currently connected to, so a hidden
+    // network we are attached to still appears in the results.
+    for ssid in connected_ssids {
+        if !hidden_ssids.contains(&ssid) {
             hidden_ssids.push(ssid);
         }
     }
 
-    let scan_ifaces = if let Some(iface_name) = iface_name {
-        if !wifi_phys.contains(&iface_name) {
-            return Err(NipartError::new(
-                ErrorKind::InvalidArgument,
-                format!("WIFI interface {iface_name} not found"),
-            ));
-        }
-        vec![iface_name]
-    } else {
-        wifi_phys
-    };
-
+    // Keep one entry per SSID, merging auth types from all BSSes of the
+    // same SSID and keeping the strongest signal.
+    let mut ret: HashMap<String, WifiScanResult> = HashMap::new();
     for iface_name in &scan_ifaces {
         let scan_results =
             shuli::WifiClient::scan(iface_name, hidden_ssids.clone())
@@ -80,53 +78,122 @@ async fn _wifi_scan(
                         format!("scan failed on {iface_name}: {e}"),
                     )
                 })?;
+        merge_scan_results(
+            &mut ret,
+            iface_name,
+            &scan_results,
+            Some(&hidden_ssids),
+        );
+    }
+    Ok(sorted_scan_results(ret))
+}
 
-        for (bss_info, ies) in &scan_results {
-            let Some(ssid) = extract_ssid(ies) else {
-                continue;
-            };
-            if ssid.is_empty() {
-                continue;
-            }
-            // A network that hides its SSID is only reported when we were
-            // asked to probe for it (e.g. --with-hidden, or it is the SSID
-            // we are currently connected to).
-            if bss_info.hidden && !hidden_ssids.contains(&ssid) {
-                continue;
-            }
+/// The WIFI interfaces to scan and the SSIDs they are currently
+/// connected to. A requested `iface_name` restricts the result to that
+/// single interface and errors when it is not a WIFI interface.
+async fn wifi_ifaces(
+    iface_name: Option<&str>,
+) -> Result<(Vec<String>, Vec<String>), NipartError> {
+    let mut filter = nispor::NetStateFilter::minimum();
+    filter.iface = Some(nispor::NetStateIfaceFilter::minimum());
+    let np_state =
+        nispor::NetState::retrieve_with_filter_async(&filter).await?;
 
-            let signal_dbm = signal_mbm_to_dbm(bss_info.signal_dbm);
-            let scan_res = WifiScanResult::new(
-                ssid.clone(),
-                Some(iface_name.to_string()),
-                Some(mac_to_string(&bss_info.bssid)),
-                Some(bss_info.freq_mhz),
-                Some(signal_dbm),
-                Some(WifiConfig::signal_dbm_to_percent(signal_dbm)),
-                detect_generation(ies),
-                vec![detect_auth_type(ies)],
-            );
-
-            if let Some(existing) = ret.get_mut(&ssid) {
-                // Merge auth types advertised by different BSSes.
-                if !existing.auth_types.contains(&scan_res.auth_types[0]) {
-                    existing.auth_types.push(scan_res.auth_types[0].clone());
-                }
-                // Keep the strongest signal per SSID.
-                if existing.signal_dbm < scan_res.signal_dbm {
-                    existing.base_iface = scan_res.base_iface;
-                    existing.bssid = scan_res.bssid;
-                    existing.frequency_mhz = scan_res.frequency_mhz;
-                    existing.signal_dbm = scan_res.signal_dbm;
-                    existing.signal_percent = scan_res.signal_percent;
-                    existing.generation = scan_res.generation;
-                }
-            } else {
-                ret.insert(ssid, scan_res);
-            }
+    let mut wifi_phys: Vec<String> = Vec::new();
+    let mut connected_ssids: Vec<String> = Vec::new();
+    for np_iface in np_state.ifaces.values() {
+        if np_iface.iface_type != nispor::IfaceType::Wifi {
+            continue;
+        }
+        wifi_phys.push(np_iface.name.clone());
+        // Remember the SSID we are currently connected to, so a hidden
+        // network we are attached to can still be probed and reported.
+        if let Some(ssid) = np_iface.wifi.as_ref().and_then(|w| w.ssid.clone())
+            && !ssid.is_empty()
+            && !connected_ssids.contains(&ssid)
+        {
+            connected_ssids.push(ssid);
         }
     }
 
+    if let Some(iface_name) = iface_name {
+        if !wifi_phys.iter().any(|name| name == iface_name) {
+            return Err(NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("WIFI interface {iface_name} not found"),
+            ));
+        }
+        return Ok((vec![iface_name.to_string()], connected_ssids));
+    }
+    Ok((wifi_phys, connected_ssids))
+}
+
+/// Merge `(BssInfo, raw IEs)` entries into `ret`, keeping one
+/// [`WifiScanResult`] per SSID: auth types advertised by different BSSes
+/// of the same SSID are merged and the strongest signal wins.
+///
+/// `hidden_ssids` is `Some` for an active scan: hidden BSSes are only
+/// reported when the caller probed for their SSID. `None` is a kernel
+/// scan dump, which reports every SSID the kernel cached.
+fn merge_scan_results(
+    ret: &mut HashMap<String, WifiScanResult>,
+    iface_name: &str,
+    scan_results: &[(BssInfo, Vec<u8>)],
+    hidden_ssids: Option<&[String]>,
+) {
+    for (bss_info, ies) in scan_results {
+        let Some(ssid) = extract_ssid(ies) else {
+            continue;
+        };
+        if ssid.is_empty() {
+            continue;
+        }
+        // A network that hides its SSID is only reported when we were
+        // asked to probe for it (e.g. --with-hidden, or it is the SSID
+        // we are currently connected to).
+        if bss_info.hidden
+            && let Some(hidden_ssids) = hidden_ssids
+            && !hidden_ssids.contains(&ssid)
+        {
+            continue;
+        }
+
+        // shuli reports the scan signal in dBm already.
+        let signal_dbm = bss_info.signal_dbm as i16;
+        let scan_res = WifiScanResult::new(
+            ssid.clone(),
+            Some(iface_name.to_string()),
+            Some(mac_to_string(&bss_info.bssid)),
+            Some(bss_info.freq_mhz),
+            Some(signal_dbm),
+            Some(WifiConfig::signal_dbm_to_percent(signal_dbm)),
+            detect_generation(ies),
+            vec![detect_auth_type(ies)],
+        );
+
+        if let Some(existing) = ret.get_mut(&ssid) {
+            // Merge auth types advertised by different BSSes.
+            if !existing.auth_types.contains(&scan_res.auth_types[0]) {
+                existing.auth_types.push(scan_res.auth_types[0].clone());
+            }
+            // Keep the strongest signal per SSID.
+            if existing.signal_dbm < scan_res.signal_dbm {
+                existing.base_iface = scan_res.base_iface;
+                existing.bssid = scan_res.bssid;
+                existing.frequency_mhz = scan_res.frequency_mhz;
+                existing.signal_dbm = scan_res.signal_dbm;
+                existing.signal_percent = scan_res.signal_percent;
+                existing.generation = scan_res.generation;
+            }
+        } else {
+            ret.insert(ssid, scan_res);
+        }
+    }
+}
+
+fn sorted_scan_results(
+    ret: HashMap<String, WifiScanResult>,
+) -> Vec<WifiScanResult> {
     let mut ret: Vec<WifiScanResult> = ret.into_values().collect();
     // Sort by signal strength (strongest first), then SSID for a
     // deterministic output order.
@@ -135,7 +202,7 @@ async fn _wifi_scan(
             .cmp(&a.signal_percent)
             .then_with(|| a.ssid.cmp(&b.ssid))
     });
-    Ok(ret)
+    ret
 }
 
 fn extract_ssid(ies: &[u8]) -> Option<String> {
@@ -330,11 +397,6 @@ fn mac_to_string(mac: &[u8; 6]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(":")
-}
-
-/// Convert the nl80211 scan signal from mBm to dBm. `-3000` means `-30 dBm`.
-fn signal_mbm_to_dbm(signal_mbm: i32) -> i16 {
-    (signal_mbm / 100) as i16
 }
 
 #[cfg(test)]

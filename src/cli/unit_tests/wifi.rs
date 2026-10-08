@@ -24,6 +24,15 @@ fn new_scan_result(
 }
 
 #[test]
+fn test_wifi_without_subcommand_dumps_kernel_scan_result() {
+    let matches = CommandWifi::new_cmd()
+        .try_get_matches_from(["wifi"])
+        .unwrap();
+
+    assert!(matches.subcommand_name().is_none());
+}
+
+#[test]
 fn test_wifi_down_is_alias_of_off() {
     let matches = CommandWifi::new_cmd()
         .try_get_matches_from(["wifi", "down"])
