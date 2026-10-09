@@ -71,7 +71,28 @@ impl NipartCommander {
     /// The interface monitor is then started; its initial link dump is
     /// applied by the event worker as one batch, which performs the boot
     /// activation of the physical interfaces (including wifi).
+    ///
+    /// The monitor is started even when loading the boot state fails,
+    /// otherwise the daemon would stay deaf to link events for the rest of
+    /// its life.  `Start` is idempotent and emits an empty initial batch
+    /// when there is no watch, so the boot transaction lock is still
+    /// released.
     pub(crate) async fn boot_apply(&mut self) -> Result<(), NipartError> {
+        match self.boot_apply_inner().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Err(start_err) = self.monitor_manager.start().await {
+                    log::error!(
+                        "Failed to start interface monitor after boot \
+                         failure: {start_err}"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn boot_apply_inner(&mut self) -> Result<(), NipartError> {
         let mut saved_state = self.conf_manager.query_state().await?;
         // Interfaces with `auto-connect: false` are only activated upon
         // explicit apply action, not at boot.
