@@ -317,6 +317,23 @@ fn test_link_down_event_processed_when_current_down() {
 }
 
 #[test]
+fn test_stale_link_down_event_skipped_when_current_dormant() {
+    // `dormant` means carrier is up while waiting for a supplicant (e.g.
+    // 802.1X), which the live netlink path reports as up: a leftover down
+    // event must not purge its IP stack.
+    let saved_state = gen_saved_state();
+    let wan0 = find_iface(&saved_state, "wan0");
+    let mut cur_iface = wan0.clone();
+    cur_iface.base_iface_mut().link_state =
+        Some(nipart::InterfaceLinkState::Dormant);
+
+    assert!(is_stale_link_down_event(
+        &gen_link_event("eth0", false),
+        Some(&cur_iface)
+    ));
+}
+
+#[test]
 fn test_up_event_never_stale() {
     // Up events always go through: they are the mechanism to (re)apply
     // the saved config, and skipping them would break hotplug (e.g.

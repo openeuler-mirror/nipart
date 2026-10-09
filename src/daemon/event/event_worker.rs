@@ -676,7 +676,15 @@ fn is_stale_link_down_event(
     !event.is_up
         && !event.is_delete
         && cur_iface.is_some_and(|iface| {
-            iface.base_iface().link_state == Some(InterfaceLinkState::Up)
+            // `dormant` (carrier up, waiting for a supplicant) is up on the
+            // live netlink path (`IFF_LOWER_UP`) and must be treated the
+            // same here, otherwise the stale down event would purge the IP
+            // stack of a link which is not actually down.
+            matches!(
+                iface.base_iface().link_state,
+                Some(InterfaceLinkState::Up)
+                    | Some(InterfaceLinkState::Dormant)
+            )
         })
 }
 
