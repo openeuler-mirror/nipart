@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use futures_channel::{mpsc::UnboundedReceiver, oneshot::Sender};
 use nipart::{
@@ -128,8 +128,7 @@ impl NipartEventWorker {
         // Virtual interfaces already added to `desired_state` because a
         // physical port/parent of them appeared in this batch.  Several
         // events can name ports of the same missing controller.
-        let mut added_virtual_dependents: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut added_virtual_dependents: HashSet<String> = HashSet::new();
 
         for mut event in events {
             // Kernel event is always for kernel interface
@@ -563,6 +562,7 @@ fn gen_missing_virtual_dependents(
     saved_state: &NetworkState,
     cur_state: &NetworkState,
 ) -> Vec<Interface> {
+    let event_names = event_identity_names(event, saved_state, cur_state);
     let mut ret: Vec<Interface> = Vec::new();
     for saved_iface in saved_state.ifaces.iter() {
         if !saved_iface.is_virtual()
@@ -573,8 +573,13 @@ fn gen_missing_virtual_dependents(
         {
             continue;
         }
-        if !virtual_depends_on_event(saved_iface, event, saved_state, cur_state)
-        {
+        if !virtual_depends_on_event(
+            saved_iface,
+            &event_names,
+            saved_state,
+            cur_state,
+            event,
+        ) {
             continue;
         }
         if cur_state
@@ -589,20 +594,48 @@ fn gen_missing_virtual_dependents(
     ret
 }
 
+/// Every saved name identifying the event's kernel interface: the kernel
+/// name itself plus the logical/kernel/profile names of the saved interfaces
+/// matching the event (by name or MAC address).  A virtual interface
+/// referencing its parent/port by a logical name (e.g. a MAC-identified NIC)
+/// therefore still matches.
+fn event_identity_names(
+    event: &InterfaceLinkEvent,
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+) -> HashSet<String> {
+    let mut ret: HashSet<String> = HashSet::new();
+    ret.insert(event.iface_name.clone());
+    for saved_iface in saved_state.ifaces.iter() {
+        if !saved_iface_matches_event(saved_iface, event, cur_state) {
+            continue;
+        }
+        ret.insert(saved_iface.name().to_string());
+        if !saved_iface.kernel_iface_name().is_empty() {
+            ret.insert(saved_iface.kernel_iface_name().to_string());
+        }
+        if let Some(profile) = saved_iface.base_iface().profile_name.as_deref()
+        {
+            ret.insert(profile.to_string());
+        }
+    }
+    ret
+}
+
 /// Whether the saved virtual interface is built on the event's kernel
 /// interface: a controller with it in the port list, a controller named by
 /// the port's saved `controller` property, or a child (VLAN, VXLAN, ...)
 /// whose parent it is.
 fn virtual_depends_on_event(
     saved_iface: &Interface,
-    event: &InterfaceLinkEvent,
+    event_names: &HashSet<String>,
     saved_state: &NetworkState,
     cur_state: &NetworkState,
+    event: &InterfaceLinkEvent,
 ) -> bool {
-    if saved_iface
-        .ports()
-        .is_some_and(|ports| ports.iter().any(|port| *port == event.iface_name))
-    {
+    if saved_iface.ports().is_some_and(|ports| {
+        ports.iter().any(|port| event_names.contains(*port))
+    }) {
         return true;
     }
     // A port may identify its controller while the port's own saved name is
@@ -615,7 +648,9 @@ fn virtual_depends_on_event(
     }) {
         return true;
     }
-    saved_iface.parent() == Some(event.iface_name.as_str())
+    saved_iface
+        .parent()
+        .is_some_and(|parent| event_names.contains(parent))
 }
 
 /// Whether the saved interface is the kernel interface the event reports:

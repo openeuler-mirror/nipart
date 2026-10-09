@@ -647,3 +647,42 @@ fn test_gen_missing_virtual_dependents() {
             .is_empty()
     );
 }
+
+#[test]
+fn test_gen_missing_virtual_dependents_matches_logical_parent_name() {
+    // A VLAN whose base-iface is the logical name of a MAC-identified NIC
+    // must be created when that NIC appears under its kernel name.
+    let saved_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: wan
+                type: ethernet
+                state: up
+                identifier: mac-address
+                mac-address: "02:00:00:00:00:07"
+              - name: vlan-wan
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: wan
+                  id: 7
+            "#,
+    )
+    .unwrap();
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth7
+                type: ethernet
+                state: up
+                mac-address: "02:00:00:00:00:07"
+            "#,
+    )
+    .unwrap();
+    let event = gen_link_event("eth7", true);
+
+    let dependents =
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state);
+    assert_eq!(dependents.len(), 1);
+    assert_eq!(dependents[0].name(), "vlan-wan");
+}
