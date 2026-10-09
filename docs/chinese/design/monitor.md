@@ -185,6 +185,31 @@ commander 辅助函数：在 `apply_merged_state()` 之前暂停，并在所有�
 wifi-phy 随后会以带 SSID 的 carrier-up 事件上报，该 up 事件会应用
 wifi-cfg 的 IP 栈 —— 这是真正的新状态，而不是重复事件。
 
+### 应用重试
+
+每次应用有两层重试：
+
+* **内层验证重试**重试应用后的状态校验（`apply_merged_state()`，
+  `RETRY_COUNT`/`WIFI_RETRY_COUNT` × 500 ms）；
+* **顶层应用重试**包裹整个应用（内核、插件、DHCP 与校验），失败后等待
+  2 秒重试一次（`src/daemon/apply.rs` 中的 `APPLY_RETRY_MAX = 2`、
+  `APPLY_RETRY_INTERVAL_SEC = 2`）。不可重试的错误
+  （`ErrorKind::retriable()`：参数非法、不支持、认证/权限失败、Bug 等）
+  立即上报。
+
+无守护进程模式（`NipartNoDaemon::apply_network_state()`，
+`src/lib/no_daemon/apply.rs`）具有相同的两层重试。
+
+顶层重试仍以可重试错误失败时，事件 worker 会清除失败接口的已发送状态
+（`NipartMonitorCmd::ForgetEmitted`），下一次协调会重新发送它们并再次
+尝试应用；wifi-phy 的“已知”标记也会被清除，从而再次把保存的 WIFI 配置
+交给插件。
+
+即使加载启动状态失败，`boot_apply()` 也会启动监视器，避免守护进程此后
+对链路事件失聪；`Start` 是幂等的，在没有监听项时发送空初始批次，因此
+启动事务锁一定被释放。守护进程根据初始批次结果打印 "Boot saved state
+applied" 或 "Failed to apply boot saved state:"。
+
 ## 通过事件批次进行启动激活
 
 ### 移除启动配置加载器
@@ -287,6 +312,18 @@ DNS resolver 不是内核链路状态，当内核侧状态已匹配时，事件�
 守护进程在启动时、启动监视器之前直接应用这些状态，因此初始链路转储
 已经能看到虚拟接口被创建、全局状态被安装。它们都不属于事件驱动的
 激活批次。
+
+在此启动应用中，只有当路由或路由规则的目标虚拟接口当前已存在、或可被
+本次应用创建时（对当前内核接口与每个虚拟接口的 parent/ports 做依赖
+不动点计算）才会包含它。对无法创建的目标应用路由/规则会失败并回滚整个
+启动状态；其余交给事件路径稍后应用。
+
+当虚拟接口的端口（控制器）或 parent（VLAN、VXLAN 等）在启动时不存在
+时，事件 worker 会在其稍后出现时创建它：物理接口的链路事件会把缺失的
+依赖虚拟接口配置一并放入目标状态，从而创建 bond/bridge/VRF 并接入其
+端口，或在 parent 出现后创建 VLAN。端口列表与 parent 的匹配同时使用
+内核名、保存的逻辑/内核名与 MAC 地址，因此逻辑名（例如
+MAC-identified NIC）也能匹配。
 
 物理接口（包括 wifi）保持单一的事件驱动路径。
 
@@ -411,8 +448,10 @@ worker 读取 `DAEMON_IS_ONLINE.initialized()`。5 秒节奏覆盖了旧加载�
 1. 查询完整的运行中网络状态。
 2. 对每个被跟踪的接口（位于 `iface_monitor_list`、`mac_watch_list` 或
    `emited`），构造与 netlink 路径相同形态的 `InterfaceLinkEvent`：
-   由链路状态得到 `is_up`，wifi-phy 得到 `ssid`。未被跟踪的接口会被
-   忽略，除非其 MAC 匹配某个 MAC 监视。
+   `link-state: up` 与 `link-state: dormant`（载波已起、等待认证器）
+   视为 up，无载波的虚拟链路（`link-state: unknown`）在管理上 up 时
+   视为 up；wifi-phy 得到 `ssid`。未被跟踪的接口会被忽略，除非其 MAC
+   匹配某个 MAC 监视。
 3. **只发出发生变化的**接口：`emited` 中没有条目或其
    `is_same_state()` 不同的接口。变化的事件走正常的 `try_notify()`
    路径（包含去抖），因此抖动的接口不会在每一轮都被重新应用；未变化
@@ -421,9 +460,15 @@ worker 读取 `DAEMON_IS_ONLINE.initialized()`。5 秒节奏覆盖了旧加载�
 4. 对状态中缺失的被跟踪接口，像
    `handle_resume_deleted_ifaces()` 那样合成删除事件
    （`monitor_worker.rs:527-552`），并从最后状态恢复 MAC，使 MAC 监视
-   仍能匹配。
+   仍能匹配。接口存在但已不再被关注时不会报告为消失，而是直接丢弃其
+   过期跟踪记录，避免每轮重试一个无人关注的删除事件。
 5. 立即发出的事件作为一个 `LinkEvents { boot: false }` 批次发送；
    被去抖的 down 事件稍后通过正常的延迟队列路径触发。
+
+应用失败会由协调重试驱动：事件 worker 在可重试错误上放弃后，会对失败
+接口调用 `NipartMonitorCmd::ForgetEmitted`，下一轮协调便会重新发出它们
+（第 3 步）并再次尝试应用；wifi-phy 会被重新宣告为 new，从而把保存的
+WIFI 配置再次发送给插件。
 
 `run()` 中的调度器（`monitor_worker.rs:393-448`）保留其延迟队列 tick，
 但把下一次唤醒时间上限压到对账截止时间，因此空闲监视器不会空转。
@@ -480,6 +525,11 @@ SSID，事件 worker 的 nispor 重试与插件回退照常生效；对账本身
 | `gen_non_nic_state()` | 虚拟接口 + 全局路由/规则 | 同上 |
 | `update_daemon_online_state()` | 共享的一次性 online 锁存更新 | `src/daemon/wait_online.rs` |
 | 未变化接口上的 `restart_auto_ip` | DHCP manager 为无内核差异的接口重启客户端 | `src/daemon/dhcp/dhcp*_manager.rs` |
+| 顶层应用重试 | 可重试错误等 2 秒重试一次 | `src/daemon/apply.rs`、`src/lib/no_daemon/apply.rs` |
+| `ErrorKind::retriable()` | 按错误类型决定重试策略 | `src/lib/error.rs` |
+| `gen_non_nic_state()` 依赖不动点 | 只保留可创建虚拟接口的路由/规则 | `src/daemon/commander.rs` |
+| `gen_missing_virtual_dependents()` | 端口/parent 事件创建缺失的虚拟接口 | `src/daemon/event/event_worker.rs` |
+| `NipartMonitorCmd::ForgetEmitted` | 失败接口由对账重新发出 | `src/daemon/monitor/monitor_worker.rs` |
 
 ## 代码移除
 
@@ -492,9 +542,9 @@ SSID，事件 worker 的 nispor 重试与插件回退照常生效；对账本身
   （`monitor_worker.rs:344-348`、`monitor_manager.rs:294-309`）。
 * `BOOTUP_NIC_CHECK_MAX_QUICK` / `BOOTUP_NIC_CHECK_INTERVAL_MS_QUICK`
   （`commander.rs:35-36`）。
-* 评估 `is_stale_link_down_event()`（`event_worker.rs:390-399`）：仅在
-  应用期间排队的实时 down 事件仍需要它时保留；批次与对账比较应使其
-  变得多余。
+* 保留 `is_stale_link_down_event()`（`event_worker.rs:390-399`）：应用
+  期间排队的实时 down 事件仍需要它。它现在把当前 `dormant` 链路状态
+  视为 up，与实时 netlink 路径一致。
 
 ## 故障模式
 
@@ -502,10 +552,9 @@ SSID，事件 worker 的 nispor 重试与插件回退照常生效；对账本身
   应答（有界重试循环，`plugin_worker.rs:118-128`），因此 `Start` 只在
   已发现的插件就绪时发出；始终不应答的插件会像今天一样被视为不存在。
   之后死亡的插件由现有的插件错误路径处理，而不是由启动顺序处理。
-* **批次应用部分失败**：事件 worker 必须记录日志并继续处理已成功应用
-  的接口，然后只为已验证的状态把守护进程标记为 online，与今天的启动
-  加载器相同（`commander.rs:203-235`）。失败的接口保持被监视，并由
-  对账重试。
+* **批次应用部分失败**：事件 worker 记录失败，顶层重试会把整个应用
+  再运行一次。若仍以可重试错误失败，则清除失败接口的已发送状态，使
+  下一轮对账重新发出它们并重试应用；不可重试的错误直接上报，不重试。
 * **守护进程在已连接的 wifi 关联上重启**：守护进程重启后 wifi 插件是
   全新进程，因此 WIFI 总是从头开始；不存在对内核关联的特殊接管。初始
   批次把重启当作普通启动：把已保存配置交给插件，由 shuli 扫描/连接。

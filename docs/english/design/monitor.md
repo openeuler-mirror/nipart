@@ -202,6 +202,36 @@ changed during the apply (the `paused_state` comparison already does this,
 batch is later reported carrier-up with an SSID, and that up event applies
 the wifi-cfg IP stack - a genuinely new state, not a duplicate.
 
+### Apply retry
+
+Every apply has two retry layers:
+
+* the **inner verification retry** retries the post-apply state check
+  (`apply_merged_state()`, `RETRY_COUNT`/`WIFI_RETRY_COUNT` x 500 ms);
+* the **top-level apply retry** wraps the whole apply (kernel, plugin, DHCP
+  and verification) and retries it once after 2 seconds
+  (`APPLY_RETRY_MAX = 2`, `APPLY_RETRY_INTERVAL_SEC = 2` in
+  `src/daemon/apply.rs`). Errors whose kind is not retriable
+  (`ErrorKind::retriable()`: invalid argument, unsupported request,
+  authentication/permission failure, bug, ...) are reported immediately.
+
+The same two layers exist in no-daemon mode
+(`NipartNoDaemon::apply_network_state()`, `src/lib/no_daemon/apply.rs`).
+
+When the top-level retry also fails with a retriable error, the event
+worker forgets the emitted state of the failed interfaces
+(`NipartMonitorCmd::ForgetEmitted`), so the next reconciliation pass
+re-emits them and the apply is attempted again. A wifi-phy loses its
+"known" mark too, so the saved WIFI profiles are handed to the plugin
+again.
+
+`boot_apply()` starts the monitor even when loading the boot state fails,
+so a boot error cannot leave the daemon deaf to link events; `Start` is
+idempotent and emits an empty initial batch when there is no watch, so the
+boot transaction lock is always released. The daemon logs the initial
+batch result ("Boot saved state applied" or "Failed to apply boot saved
+state:").
+
 ## Boot Activation Via Event Batch
 
 ### Removing the boot config loader
@@ -314,6 +344,20 @@ The daemon applies this state directly during boot, before the monitor
 is started, so the initial link dump already sees the virtual interfaces
 created and the global state installed. None of it is part of the
 event-driven activation batch.
+
+Within this boot apply, a route or route rule is only included when its
+target virtual interface exists now or is creatable by the apply (a
+dependency fixpoint over the present kernel interfaces and each virtual's
+parent/ports). Applying a route/rule whose target cannot be created would
+fail and roll back the whole boot state; the event path applies it later.
+
+A virtual interface whose port (controller) or parent (VLAN, VXLAN, ...)
+is absent at boot is created later by the event worker: the physical
+interface's link event includes the missing dependent virtual configs in
+its desired state, so a bond/bridge/VRF is created and its port attached,
+and a VLAN is created once its parent exists. Port lists and parents are
+matched through the kernel name, the saved logical/kernel name and the MAC
+address, so a logical name (e.g. a MAC-identified NIC) matches too.
 
 Physical interfaces, including wifi, keep the single event-driven path.
 
@@ -454,8 +498,11 @@ kernel publishes it.
 1. Query the full running network state.
 2. For every tracked interface (in `iface_monitor_list`, `mac_watch_list`
    or `emited`), build the same `InterfaceLinkEvent` shape the netlink
-   path produces: `is_up` from the link state and `ssid` for a wifi-phy.
-   An untracked interface is ignored unless its MAC matches a MAC watch.
+   path produces: `is_up` is true for `link-state: up` and
+   `link-state: dormant` (carrier up while waiting for a supplicant), and
+   for a carrier-less virtual link (`link-state: unknown`) when
+   administratively up; `ssid` is set for a wifi-phy.  An untracked
+   interface is ignored unless its MAC matches a MAC watch.
 3. Emit **only changed** interfaces: an interface whose `emited` entry is
    missing or whose `is_same_state()` differs. Changed events go through
    the normal `try_notify()` path (debounce included), so a flapping
@@ -465,10 +512,19 @@ kernel publishes it.
 4. For tracked interfaces missing from the state, synthesize delete
    events as `handle_resume_deleted_ifaces()` does
    (`monitor_worker.rs:527-552`), restoring the MAC from the last state so
-   a MAC watch still matches.
+   a MAC watch still matches.  An interface which is present but no longer
+   interested is not reported as disappeared, and its stale tracking
+   record is dropped instead of retrying an uninterested delete event.
 5. Events emitted immediately are sent as one `LinkEvents { boot: false }`
    batch; debounced down events fire later through the normal delay-queue
    path.
+
+A failed apply is re-driven from reconciliation: when the event worker
+gives up on a retriable error it calls
+`NipartMonitorCmd::ForgetEmitted` for the failed interfaces, so the next
+pass emits them again (step 3) and the apply is retried.  A wifi-phy is
+announced as new again, so the saved WIFI profiles are re-sent to the
+plugin too.
 
 The scheduler in `run()` (`monitor_worker.rs:393-448`) keeps its
 delay-queue ticker but caps the next wake-up at the reconciliation
@@ -532,6 +588,11 @@ event for the same interface replaces or removes the queued entry.
 | `gen_non_nic_state()` | virtual ifaces + global routes/rules | same |
 | `update_daemon_online_state()` | shared one-shot online latch update | `src/daemon/wait_online.rs` |
 | `restart_auto_ip` on unchanged ifaces | DHCP managers restart clients with no kernel diff | `src/daemon/dhcp/dhcp*_manager.rs` |
+| top-level apply retry | one retry after 2 s on retriable errors | `src/daemon/apply.rs`, `src/lib/no_daemon/apply.rs` |
+| `ErrorKind::retriable()` | retry policy per error kind | `src/lib/error.rs` |
+| `gen_non_nic_state()` dependency fixpoint | only routes/rules of creatable virtuals | `src/daemon/commander.rs` |
+| `gen_missing_virtual_dependents()` | event creates missing virtuals of a port/parent | `src/daemon/event/event_worker.rs` |
+| `NipartMonitorCmd::ForgetEmitted` | failed interfaces are re-emitted by reconcile | `src/daemon/monitor/monitor_worker.rs` |
 
 ## Code Removals
 
@@ -544,9 +605,9 @@ event for the same interface replaces or removes the queued entry.
   (`monitor_worker.rs:344-348`, `monitor_manager.rs:294-309`).
 * `BOOTUP_NIC_CHECK_MAX_QUICK` / `BOOTUP_NIC_CHECK_INTERVAL_MS_QUICK`
   (`commander.rs:35-36`).
-* Evaluate `is_stale_link_down_event()` (`event_worker.rs:390-399`): keep
-  it only if queued live down events during an apply still need it; the
-  batch and reconcile comparisons should make it redundant.
+* `is_stale_link_down_event()` (`event_worker.rs:390-399`) is kept: queued
+  live down events during an apply still need it.  It now treats a
+  `dormant` current link state as up, the same as the live netlink path.
 
 ## Failure Modes
 
@@ -556,11 +617,11 @@ event for the same interface replaces or removes the queued entry.
   it found; a plugin that never answers is treated as absent, as today.
   A plugin that dies later is handled by the existing plugin error paths,
   not by boot ordering.
-* **Batch apply fails partially**: the event worker must log and continue
-  with the interfaces that did apply, then mark the daemon online only for
-  the states that verified it, same as today's boot loader
-  (`commander.rs:203-235`). The failed interfaces stay watched and are
-  retried by reconciliation.
+* **Batch apply fails partially**: the event worker logs the failure and
+  the top-level retry re-runs the whole apply once.  If it still fails
+  with a retriable error, the failed interfaces' emitted state is
+  forgotten so the next reconciliation pass re-emits them and retries the
+  apply; non-retriable errors are reported without retrying.
 * **Daemon restart on a live wifi association**: the wifi plugin is a
   fresh process after a daemon restart, so WIFI is always started from
   scratch; there is no special adoption of the kernel association. The
