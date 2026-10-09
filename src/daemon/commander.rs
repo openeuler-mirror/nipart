@@ -111,7 +111,10 @@ impl NipartCommander {
                 "Failed to restore saved DNS resolver configuration: {e}"
             );
         }
-        let non_nic_state = gen_non_nic_state(&saved_state);
+        let cur_state =
+            NipartNoDaemon::query_network_state(NipartQueryOption::running())
+                .await?;
+        let non_nic_state = gen_non_nic_state(&saved_state, &cur_state);
         if !non_nic_state.is_empty() {
             log::debug!("Applying non-NIC saved state: {non_nic_state}");
             if let Err(e) = self
@@ -484,29 +487,29 @@ fn gen_wifi_off_purge_state(cur_state: &NetworkState) -> NetworkState {
 /// Build the saved state which is not attached to a physical NIC and can
 /// therefore not be activated by a link event: virtual interfaces and the
 /// routes/route-rules that belong to them or are global.
-fn gen_non_nic_state(saved_state: &NetworkState) -> NetworkState {
+///
+/// `cur_state` decides which virtual interfaces this apply can actually
+/// create: a virtual interface whose parent/ports exist now (directly or
+/// through another creatable virtual) is ready.  The routes and route rules
+/// referencing a virtual interface which cannot be created are left to the
+/// event path: installing them now would fail because the interface does not
+/// exist, and that failure would roll back the whole boot state.
+fn gen_non_nic_state(
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+) -> NetworkState {
     let mut ret = NetworkState::default();
     for iface in saved_state.ifaces.iter() {
         if iface.is_virtual() {
             ret.ifaces.push(iface.clone());
         }
     }
-    let virtual_names: HashSet<&str> = ret
-        .ifaces
-        .iter()
-        .flat_map(|iface| {
-            [
-                iface.name(),
-                iface.kernel_iface_name(),
-                iface.base_iface().profile_name.as_deref().unwrap_or(""),
-            ]
-        })
-        .collect();
+    let creatable_names = gen_creatable_virtual_names(saved_state, cur_state);
     if let Some(routes) = saved_state.routes.config.as_ref() {
         for route in routes {
             let non_nic = match route.next_hop_iface.as_deref() {
                 None => true,
-                Some(next_hop) => virtual_names.contains(next_hop),
+                Some(next_hop) => creatable_names.contains(next_hop),
             };
             if non_nic {
                 ret.routes
@@ -517,12 +520,9 @@ fn gen_non_nic_state(saved_state: &NetworkState) -> NetworkState {
         }
     }
     // Route rules match selectors, not a link.  Only the global rules (no
-    // `iif`) and the rules whose `iif` is one of the virtual interfaces
-    // created here are applied: a rule naming a physical interface cannot be
-    // installed before that interface exists, and a failed rule apply would
-    // roll back the virtual interfaces created in the same transaction.
-    // The event path re-applies such rules once the interface link event
-    // arrives.
+    // `iif`) and the rules whose `iif` is a virtual interface this apply can
+    // create are applied here; a rule naming a physical interface or a
+    // virtual whose parent is absent is deferred to the event path.
     if let Some(rules) = saved_state.route_rules.config.as_ref() {
         ret.route_rules.config = Some(
             rules
@@ -530,11 +530,69 @@ fn gen_non_nic_state(saved_state: &NetworkState) -> NetworkState {
                 .filter(|rule| {
                     rule.iif
                         .as_deref()
-                        .is_none_or(|iif| virtual_names.contains(iif))
+                        .is_none_or(|iif| creatable_names.contains(iif))
                 })
                 .cloned()
                 .collect(),
         );
+    }
+    ret
+}
+
+/// Names of the saved virtual interfaces which can exist after this apply: a
+/// virtual interface already present in the kernel, or whose parent/ports all
+/// belong to this set.  Userspace interfaces (e.g. OVS bridge, wifi-cfg) are
+/// created by their plugin and count as ready.
+fn gen_creatable_virtual_names(
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+) -> HashSet<String> {
+    let mut ready: HashSet<String> =
+        cur_state.ifaces.kernel_ifaces.keys().cloned().collect();
+    let mut ret: HashSet<String> = HashSet::new();
+    // Iterate to a fixpoint so a chain (VLAN over bond over eth0) is only
+    // ready once its whole dependency chain is.
+    loop {
+        let mut changed = false;
+        for iface in saved_state
+            .ifaces
+            .iter()
+            .filter(|i| i.is_virtual() && !i.is_absent())
+        {
+            let names = virtual_iface_identity_names(iface);
+            if names.iter().any(|name| ready.contains(name)) {
+                ret.extend(names);
+                continue;
+            }
+            let dependencies = if iface.is_userspace() {
+                Vec::new()
+            } else if iface.is_controller() {
+                iface.ports().unwrap_or_default()
+            } else if let Some(parent) = iface.parent() {
+                vec![parent]
+            } else {
+                Vec::new()
+            };
+            if dependencies.iter().all(|dep| ready.contains(*dep)) {
+                ret.extend(names.iter().cloned());
+                ready.extend(names);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ret
+}
+
+fn virtual_iface_identity_names(iface: &Interface) -> Vec<String> {
+    let mut ret = vec![iface.name().to_string()];
+    if !iface.kernel_iface_name().is_empty() {
+        ret.push(iface.kernel_iface_name().to_string());
+    }
+    if let Some(profile) = iface.base_iface().profile_name.as_deref() {
+        ret.push(profile.to_string());
     }
     ret
 }

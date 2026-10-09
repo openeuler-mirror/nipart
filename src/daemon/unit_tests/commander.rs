@@ -127,6 +127,10 @@ fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
                   metric: 104
                 - destination: 192.0.2.0/24
                   metric: 105
+                - destination: 198.18.0.0/24
+                  next-hop-interface: vlan0
+                  next-hop-address: 192.0.2.1
+                  metric: 106
             route-rules:
               config:
                 - ip-from: 203.0.113.0/24
@@ -137,6 +141,9 @@ fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
                 - ip-from: 192.0.2.0/24
                   route-table: 500
                   iif: bond0
+                - ip-from: 198.18.0.0/24
+                  route-table: 500
+                  iif: vlan0
             interfaces:
               - name: eth0
                 type: ethernet
@@ -148,39 +155,64 @@ fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
                   mode: balance-rr
                   ports:
                     - name: eth0
+              - name: vlan0
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: bond0
+                  id: 100
             "#,
     )
     .unwrap();
 
-    let non_nic = gen_non_nic_state(&state);
-    // Only the virtual bond0 is applied directly; eth0 goes through the
-    // event-driven batch.
-    assert_eq!(non_nic.ifaces.iter().count(), 1);
-    assert_eq!(non_nic.ifaces.iter().next().unwrap().name(), "bond0");
-    // Routes without a next-hop interface and routes egressing the virtual
-    // interface are included; the eth0 route is not.
-    let routes = non_nic.routes.config.unwrap();
-    assert_eq!(routes.len(), 2);
+    // Without the eth0 port present, neither bond0 nor the VLAN built on top
+    // of it can be created: only the global route and rule are applied now.
+    let empty_cur_state = NetworkState::default();
+    let non_nic = gen_non_nic_state(&state, &empty_cur_state);
+    // All virtual interfaces are still in the creation state; only the
+    // virtual routes/rules which cannot be installed are deferred.
+    assert_eq!(non_nic.ifaces.iter().count(), 2);
+    let routes = non_nic.routes.config.as_ref().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].destination.as_deref(), Some("192.0.2.0/24"));
+    let rules = non_nic.route_rules.config.as_ref().unwrap();
+    assert_eq!(rules.len(), 1);
     assert!(
-        routes
-            .iter()
-            .any(|r| r.destination.as_deref() == Some("198.51.100.0/24"))
+        rules[0].iif.is_none()
+            && rules[0].ip_from.as_deref() == Some("203.0.113.0/24")
     );
-    assert!(
-        routes
-            .iter()
-            .any(|r| r.destination.as_deref() == Some("192.0.2.0/24"))
-    );
-    // Route rules: the global one and the one bound to the virtual bond0
-    // are applied; the rule bound to the physical eth0 is deferred to the
-    // event path because eth0 does not exist yet.
-    let rules = non_nic.route_rules.config.unwrap();
-    assert_eq!(rules.len(), 2);
-    assert!(
-        rules.iter().any(|r| r.iif.is_none()
-            && r.ip_from.as_deref() == Some("203.0.113.0/24"))
-    );
-    assert!(rules.iter().any(|r| r.iif.as_deref() == Some("bond0")));
+
+    // With eth0 present, bond0 is creatable and the VLAN built on top of it
+    // becomes creatable through the dependency chain: their routes and rules
+    // are applied by this transaction.
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+            "#,
+    )
+    .unwrap();
+    let non_nic = gen_non_nic_state(&state, &cur_state);
+    let routes = non_nic.routes.config.as_ref().unwrap();
+    let destinations: Vec<&str> = routes
+        .iter()
+        .filter_map(|r| r.destination.as_deref())
+        .collect();
+    assert_eq!(destinations.len(), 3);
+    assert!(destinations.contains(&"198.51.100.0/24"));
+    assert!(destinations.contains(&"192.0.2.0/24"));
+    assert!(destinations.contains(&"198.18.0.0/24"));
+    let rules = non_nic.route_rules.config.as_ref().unwrap();
+    let iifs: Vec<Option<&str>> =
+        rules.iter().map(|r| r.iif.as_deref()).collect();
+    // The eth0 rule is deferred to the event path; the global, bond0 and
+    // vlan0 rules are applied here.
+    assert!(!iifs.contains(&Some("eth0")));
+    assert!(iifs.contains(&Some("bond0")));
+    assert!(iifs.contains(&Some("vlan0")));
+    assert!(iifs.contains(&None));
 }
 
 #[test]
