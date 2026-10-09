@@ -209,8 +209,7 @@ impl InterfaceIpv4 {
         }
 
         if let Some(addrs) = self.addresses.as_mut() {
-            if let Some(addr) = addrs.as_slice().iter().find(|a| a.ip.is_ipv6())
-            {
+            if let Some(addr) = addrs.iter().find(|a| a.ip.is_ipv6()) {
                 return Err(NipartError::new(
                     ErrorKind::InvalidArgument,
                     format!("Got IPv6 address {addr} in ipv4 config section"),
@@ -415,7 +414,7 @@ impl InterfaceIpv6 {
     ) -> Result<(), NipartError> {
         self.dhcp_state = None;
         if let Some(addrs) = self.addresses.as_mut() {
-            for addr in addrs.as_slice().iter().filter(|a| a.is_auto()) {
+            for addr in addrs.iter().filter(|a| a.is_auto()) {
                 log::info!("Ignoring Auto IP address {addr}");
             }
             if let Some(addr) = addrs.iter().find(|a| a.ip.is_ipv4()) {
@@ -606,9 +605,9 @@ impl InterfaceIpAddr {
     }
 }
 
-impl std::convert::TryFrom<&str> for InterfaceIpAddr {
-    type Error = NipartError;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+impl std::str::FromStr for InterfaceIpAddr {
+    type Err = NipartError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut addr: Vec<&str> = value.split('/').collect();
         addr.resize(2, "");
         let ip = IpAddr::from_str(addr[0]).map_err(|e| {

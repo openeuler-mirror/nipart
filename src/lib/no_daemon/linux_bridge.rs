@@ -109,7 +109,6 @@ impl From<&nispor::BridgeInfo> for LinuxBridgeConfig {
             ports: Some(
                 np_bridge
                     .ports
-                    .as_slice()
                     .iter()
                     .map(|iface_name| LinuxBridgePortConfig {
                         name: iface_name.to_string(),

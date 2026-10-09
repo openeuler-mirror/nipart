@@ -17,7 +17,7 @@ impl InterfaceIpv4 {
             && is_ip_addrs_none_or_all_auto(old.addresses.as_deref())
             && let Some(addrs) = self.addresses.as_mut()
         {
-            addrs.as_mut_slice().iter_mut().for_each(|a| {
+            addrs.iter_mut().for_each(|a| {
                 a.valid_life_time = None;
                 a.preferred_life_time = None;
             });
@@ -45,7 +45,7 @@ impl InterfaceIpv6 {
             && is_ip_addrs_none_or_all_auto(old.addresses.as_deref())
             && let Some(addrs) = self.addresses.as_mut()
         {
-            addrs.as_mut_slice().iter_mut().for_each(|a| {
+            addrs.iter_mut().for_each(|a| {
                 a.valid_life_time = None;
                 a.preferred_life_time = None;
             });

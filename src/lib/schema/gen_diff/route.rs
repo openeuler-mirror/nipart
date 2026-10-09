@@ -23,7 +23,6 @@ impl Routes {
             (Some(new_routes), Some(old_routes)) => {
                 for new_route in new_routes {
                     if old_routes
-                        .as_slice()
                         .iter()
                         .all(|old_route| !new_route.is_match(old_route))
                     {
