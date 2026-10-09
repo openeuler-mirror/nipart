@@ -495,11 +495,25 @@ fn gen_non_nic_state(saved_state: &NetworkState) -> NetworkState {
             }
         }
     }
-    // Route rules match selectors, not a link: apply them all.  A rule with
-    // an `iif` naming a physical interface is applied once that interface
-    // exists in the kernel, regardless of its configuration.
+    // Route rules match selectors, not a link.  Only the global rules (no
+    // `iif`) and the rules whose `iif` is one of the virtual interfaces
+    // created here are applied: a rule naming a physical interface cannot be
+    // installed before that interface exists, and a failed rule apply would
+    // roll back the virtual interfaces created in the same transaction.
+    // The event path re-applies such rules once the interface link event
+    // arrives.
     if let Some(rules) = saved_state.route_rules.config.as_ref() {
-        ret.route_rules.config = Some(rules.clone());
+        ret.route_rules.config = Some(
+            rules
+                .iter()
+                .filter(|rule| {
+                    rule.iif
+                        .as_deref()
+                        .is_none_or(|iif| virtual_names.contains(iif))
+                })
+                .cloned()
+                .collect(),
+        );
     }
     ret
 }

@@ -131,6 +131,12 @@ fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
               config:
                 - ip-from: 203.0.113.0/24
                   route-table: 500
+                - ip-from: 198.51.100.0/24
+                  route-table: 500
+                  iif: eth0
+                - ip-from: 192.0.2.0/24
+                  route-table: 500
+                  iif: bond0
             interfaces:
               - name: eth0
                 type: ethernet
@@ -165,8 +171,16 @@ fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
             .iter()
             .any(|r| r.destination.as_deref() == Some("192.0.2.0/24"))
     );
-    // Route rules apply globally.
-    assert_eq!(non_nic.route_rules.config.unwrap().len(), 1);
+    // Route rules: the global one and the one bound to the virtual bond0
+    // are applied; the rule bound to the physical eth0 is deferred to the
+    // event path because eth0 does not exist yet.
+    let rules = non_nic.route_rules.config.unwrap();
+    assert_eq!(rules.len(), 2);
+    assert!(
+        rules.iter().any(|r| r.iif.is_none()
+            && r.ip_from.as_deref() == Some("203.0.113.0/24"))
+    );
+    assert!(rules.iter().any(|r| r.iif.as_deref() == Some("bond0")));
 }
 
 #[test]
