@@ -319,6 +319,24 @@ impl NipartMonitorManager {
             .await?;
         Ok(())
     }
+
+    /// Forget the last emitted link state and the known-wifi-phy mark of the
+    /// given interfaces, so the next reconciliation pass emits their event
+    /// again (and hands the saved WIFI profiles to the plugin again).  Used
+    /// to retry an apply which failed after the interfaces were already
+    /// recorded as emitted.
+    pub(crate) async fn forget_emitted(
+        &mut self,
+        iface_names: &[String],
+    ) -> Result<(), NipartError> {
+        if iface_names.is_empty() {
+            return Ok(());
+        }
+        self.mgr
+            .exec(NipartMonitorCmd::ForgetEmitted(iface_names.to_vec()))
+            .await?;
+        Ok(())
+    }
 }
 
 fn wifi_monitor_is_needed(full_saved_state: &NetworkState) -> bool {

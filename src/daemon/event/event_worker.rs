@@ -396,14 +396,32 @@ impl NipartEventWorker {
                 .await?;
         }
 
-        if !wifi_plugin_state.is_empty() {
-            commander
+        if !wifi_plugin_state.is_empty()
+            && let Err(e) = commander
                 .plugin_manager
                 .apply_network_state(
                     &wifi_plugin_state,
                     &NipartApplyOption::new().memory_only(),
                 )
-                .await?;
+                .await
+        {
+            // A retriable failure is re-driven by reconciliation: forget
+            // the phys so they are announced as new again and the saved
+            // WIFI profiles are handed to the plugin again.
+            if e.kind().retriable() {
+                let phy_names: Vec<String> = wifi_plugin_state
+                    .ifaces
+                    .iter()
+                    .map(|iface| iface.kernel_iface_name().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                log::info!(
+                    "WIFI plugin apply failed, requesting link events to \
+                     retry {phy_names:?}: {e}"
+                );
+                commander.monitor_manager.forget_emitted(&phy_names).await?;
+            }
+            return Err(e);
         }
 
         if !desired_state.is_empty() {
@@ -437,7 +455,29 @@ impl NipartEventWorker {
                 Ok(())
             };
             commander.monitor_manager.resume().await?;
-            apply_result?;
+            if let Err(e) = apply_result {
+                // Re-drive a retriable failure from reconciliation: drop the
+                // emitted state of the failed interfaces so the next
+                // reconcile pass emits them again instead of treating their
+                // unchanged link state as already handled.
+                if e.kind().retriable() {
+                    let retry_ifaces: Vec<String> = merged_state
+                        .ifaces
+                        .iter()
+                        .map(|i| i.merged.kernel_iface_name().to_string())
+                        .filter(|name| !name.is_empty())
+                        .collect();
+                    log::info!(
+                        "Apply failed, requesting link events to retry \
+                         {retry_ifaces:?}: {e}"
+                    );
+                    commander
+                        .monitor_manager
+                        .forget_emitted(&retry_ifaces)
+                        .await?;
+                }
+                return Err(e);
+            }
             setup_result?;
         } else {
             log::trace!("No change required for {event_count} event(s)");

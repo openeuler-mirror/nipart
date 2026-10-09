@@ -186,6 +186,12 @@ pub(crate) enum NipartMonitorCmd {
     /// carries no SSID to compare against the pre-pause snapshot: the
     /// event worker resolves the SSID from the current state itself.
     ForgetPausedState(Vec<String>),
+    /// Forget the last emitted link state and the known-wifi-phy mark of the
+    /// given interfaces, so the next reconciliation pass emits their event
+    /// again (a wifi-phy is announced as new again and the saved WIFI
+    /// profiles are handed to the plugin again).  Used to retry an apply
+    /// which failed after the interfaces were already recorded as emitted.
+    ForgetEmitted(Vec<String>),
 }
 
 impl std::fmt::Display for NipartMonitorCmd {
@@ -229,6 +235,9 @@ impl std::fmt::Display for NipartMonitorCmd {
             }
             Self::ForgetPausedState(ifaces) => {
                 write!(f, "forget-paused-state:{ifaces:?}")
+            }
+            Self::ForgetEmitted(ifaces) => {
+                write!(f, "forget-emitted:{ifaces:?}")
             }
         }
     }
@@ -426,6 +435,17 @@ impl TaskWorker for NipartMonitorWorker {
                 }
                 for iface in &ifaces {
                     self.emited.remove(iface);
+                }
+            }
+            NipartMonitorCmd::ForgetEmitted(ifaces) => {
+                if let Some(paused_state) = self.paused_state.as_mut() {
+                    for iface in &ifaces {
+                        paused_state.remove(iface);
+                    }
+                }
+                for iface in &ifaces {
+                    self.emited.remove(iface);
+                    self.wifi_phys_emited.remove(iface);
                 }
             }
         }

@@ -757,3 +757,30 @@ fn test_event_is_explicitly_down_matches_iface_and_ssid() {
         &explicitly_down
     ));
 }
+
+#[test]
+fn test_forget_emitted_clears_last_state_and_wifi_phys_known() {
+    let mut worker = gen_worker();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_last_state(true));
+    worker.wifi_phys_emited.insert("wlan0".to_string());
+    worker.paused_state = Some(HashMap::from([(
+        "enp1s0".to_string(),
+        gen_last_state(true),
+    )]));
+
+    rt.block_on(worker.process_cmd(NipartMonitorCmd::ForgetEmitted(vec![
+        "enp1s0".to_string(),
+        "wlan0".to_string(),
+    ])))
+    .unwrap();
+
+    // The next reconcile pass re-emits both: the interface is no longer
+    // recorded as emitted and the wifi-phy is announced as new again.
+    assert!(!worker.emited.contains_key("enp1s0"));
+    assert!(!worker.wifi_phys_emited.contains("wlan0"));
+    assert!(!worker.paused_state.as_ref().unwrap().contains_key("enp1s0"));
+}
