@@ -24,6 +24,15 @@ const RETRY_INTERVAL_MS: u64 = 500;
 // already diagnosed (wrong password, unsupported security) end the wait
 // immediately.
 const WIFI_CONNECT_WAIT_TIMEOUT_SECS: u64 = 60;
+// Top-level apply retry: the inner verification retry only absorbs
+// post-apply propagation delays, so a transient failure of the apply itself
+// (a plugin or DHCP worker still starting, a NIC/link not ready yet) would
+// abort the whole action. Every apply entry - user request, boot activation
+// and link event - retries the full apply with this interval until it
+// succeeds or the attempts are exhausted. Errors whose kind is not
+// retriable (`ErrorKind::retriable()`) are reported immediately.
+const APPLY_RETRY_MAX: u32 = 5;
+const APPLY_RETRY_INTERVAL_SEC: u64 = 2;
 
 /// A WIFI association explicitly requested by an apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,7 +541,61 @@ impl NipartCommander {
     //  * Checkpoint rollback
     //  * Config save
     //  * Setup monitor session
+    //
+    // Every apply (user request, boot activation and link event) goes through
+    // the top-level retry: a retriable failure retries the full apply after
+    // [APPLY_RETRY_INTERVAL_SEC] until [APPLY_RETRY_MAX] attempts are used.
     pub(crate) async fn apply_merged_state(
+        &mut self,
+        mut conn: Option<&mut NipartIpcConnection>,
+        merged_state: &MergedNetworkState,
+    ) -> Result<(), NipartError> {
+        let mut last_err: Option<NipartError> = None;
+        for attempt in 1..=APPLY_RETRY_MAX {
+            match self
+                .apply_merged_state_once(conn.as_deref_mut(), merged_state)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !e.kind().retriable() {
+                        log_warn(
+                            conn.as_deref_mut(),
+                            format!(
+                                "Apply failed with non-retriable error: {e}"
+                            ),
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    log_warn(
+                        conn.as_deref_mut(),
+                        format!(
+                            "Apply failed (attempt \
+                             {attempt}/{APPLY_RETRY_MAX}), retrying in \
+                             {APPLY_RETRY_INTERVAL_SEC} seconds: {e}"
+                        ),
+                    )
+                    .await;
+                    last_err = Some(e);
+                    if attempt < APPLY_RETRY_MAX {
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            APPLY_RETRY_INTERVAL_SEC,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            NipartError::new(
+                ErrorKind::Bug,
+                "BUG: apply retry loop finished without an error".to_string(),
+            )
+        }))
+    }
+
+    async fn apply_merged_state_once(
         &mut self,
         mut conn: Option<&mut NipartIpcConnection>,
         merged_state: &MergedNetworkState,
