@@ -131,9 +131,9 @@ impl NipartDaemon {
                 Ok(()) => {
                     // The monitor was started and will send the initial
                     // batch (possibly empty); wait for the event worker to
-                    // apply it before releasing the lock.
+                    // apply it before releasing the lock.  The daemon logs
+                    // the batch result itself.
                     boot_applied_wait.notified().await;
-                    log::info!("Boot saved state applied");
                 }
                 Err(e) => {
                     log::error!(
@@ -298,10 +298,17 @@ impl NipartDaemon {
                     .await;
                 if boot {
                     // Release the boot transaction lock only after the
-                    // initial batch has been applied.
+                    // initial batch has been applied (or failed).  Report
+                    // the real outcome: the lock must be released either
+                    // way, but a failed batch is not "applied".
+                    match &result {
+                        Ok(()) => log::info!("Boot saved state applied"),
+                        Err(e) => {
+                            log::error!("Failed to apply boot saved state: {e}")
+                        }
+                    }
                     self.boot_applied.notify_one();
-                }
-                if let Err(e) = result {
+                } else if let Err(e) = result {
                     log::error!("{e}");
                 }
             }
