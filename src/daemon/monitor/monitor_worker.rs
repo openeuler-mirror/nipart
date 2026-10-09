@@ -807,10 +807,12 @@ impl NipartMonitorWorker {
                 ) else {
                     continue;
                 };
+                // Record presence before the interest filter: a present but
+                // untracked interface must not be reported as disappeared.
+                seen.insert(name.clone());
                 if !self.event_is_interested(&event) {
                     continue;
                 }
-                seen.insert(name.clone());
                 // Skip until udev initialized the NIC so the recovered event
                 // cannot race a udev rename either.
                 if !crate::udev::udev_net_device_is_initialized(
@@ -843,7 +845,15 @@ impl NipartMonitorWorker {
                         self.iface_mac.insert(name.clone(), mac);
                     }
                     let event = last.to_delete_event(&name);
-                    self.try_notify(event).await?;
+                    if self.event_is_interested(&event) {
+                        self.try_notify(event).await?;
+                    } else {
+                        // No watch interests this interface anymore: drop
+                        // the stale record instead of retrying an
+                        // uninterested delete event on every pass.
+                        self.emited.remove(&name);
+                        self.wifi_phys_emited.remove(&name);
+                    }
                     self.iface_mac.remove(&name);
                 }
             }
@@ -1203,8 +1213,9 @@ fn parse_link_msg(
 /// Build a link event from a queried kernel interface (reconciliation).
 ///
 /// `is_up` follows the netlink monitor's carrier signal: `link-state: up`
-/// is carrier up; a carrier-less virtual link (`link-state: unknown`) is up
-/// when administratively up.  For a wifi-phy the association SSID is
+/// and `link-state: dormant` (carrier up while waiting for a supplicant,
+/// e.g. 802.1X) are up; a carrier-less virtual link (`link-state: unknown`)
+/// is up when administratively up.  For a wifi-phy the association SSID is
 /// included so a missed association is recovered by the periodic query.
 fn link_event_from_iface(
     iface_name: &str,
@@ -1213,7 +1224,9 @@ fn link_event_from_iface(
 ) -> Option<InterfaceLinkEvent> {
     let base = iface.base_iface();
     let is_up = match base.link_state {
-        Some(InterfaceLinkState::Up) => true,
+        Some(InterfaceLinkState::Up) | Some(InterfaceLinkState::Dormant) => {
+            true
+        }
         Some(InterfaceLinkState::Unknown) => base.state == InterfaceState::Up,
         _ => false,
     };

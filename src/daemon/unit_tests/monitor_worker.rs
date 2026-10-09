@@ -355,6 +355,19 @@ fn test_link_event_from_iface_maps_state_and_ssid() {
     .unwrap();
     assert!(link_event_from_iface("wg0", &vpn, true).unwrap().is_up);
 
+    // A dormant link (carrier up, e.g. waiting for 802.1X) is up, matching
+    // the live netlink `IFF_LOWER_UP` signal.
+    let dormant: Interface = rmsd_yaml::from_str(
+        r#"---
+            name: eth0
+            type: ethernet
+            state: up
+            link-state: dormant
+            "#,
+    )
+    .unwrap();
+    assert!(link_event_from_iface("eth0", &dormant, true).unwrap().is_up);
+
     // A wifi-phy administratively up but without carrier is down.
     let down: Interface = rmsd_yaml::from_str(
         r#"---
