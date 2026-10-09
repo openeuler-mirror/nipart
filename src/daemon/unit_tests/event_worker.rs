@@ -9,10 +9,11 @@ use nipart::{
 };
 
 use super::{
-    gen_desired_iface_down, gen_routes_for_iface_up,
-    gen_routes_for_wifi_cfg_up, gen_wifi_plugin_state_for_phy,
-    handle_event_auto_connect, handle_wifi_phy_event, is_route_matching_iface,
-    is_stale_link_down_event, nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
+    gen_desired_iface_down, gen_missing_virtual_dependents,
+    gen_routes_for_iface_up, gen_routes_for_wifi_cfg_up,
+    gen_wifi_plugin_state_for_phy, handle_event_auto_connect,
+    handle_wifi_phy_event, is_route_matching_iface, is_stale_link_down_event,
+    nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
 };
 
 fn gen_wifi_cfg_iface() -> Interface {
@@ -541,4 +542,91 @@ fn test_wifi_phy_up_event_with_other_ssid_ignores_wifi_cfg() {
     let event = gen_wifi_phy_event(true, Some("Other-SSID"));
 
     assert!(handle_wifi_phy_event(&event, &saved_iface).is_none());
+}
+
+#[test]
+fn test_gen_missing_virtual_dependents() {
+    let saved_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+              - name: eth1
+                type: ethernet
+                state: up
+              - name: bond0
+                type: bond
+                state: up
+                bond:
+                  mode: balance-rr
+                  ports:
+                    - name: eth0
+              - name: vrf0
+                type: vrf
+                state: up
+                vrf:
+                  route-table-id: "100"
+                  ports:
+                    - eth0
+              - name: vlan0
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: eth0
+                  id: 100
+              - name: vlan1
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: eth1
+                  id: 101
+            "#,
+    )
+    .unwrap();
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+            "#,
+    )
+    .unwrap();
+
+    let event = gen_link_event("eth0", true);
+    let dependents =
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state);
+    let names: Vec<&str> = dependents.iter().map(|i| i.name()).collect();
+    // bond0 and vrf0 have eth0 as port, vlan0 has eth0 as parent.  vlan1
+    // depends on eth1 and is left alone.
+    assert_eq!(names.len(), 3);
+    assert!(names.contains(&"bond0"));
+    assert!(names.contains(&"vrf0"));
+    assert!(names.contains(&"vlan0"));
+    assert!(!names.contains(&"vlan1"));
+
+    // Once the virtual interfaces exist, the event must not recreate them.
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+              - name: bond0
+                type: bond
+                state: up
+              - name: vrf0
+                type: vrf
+                state: up
+              - name: vlan0
+                type: vlan
+                state: up
+            "#,
+    )
+    .unwrap();
+    assert!(
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state)
+            .is_empty()
+    );
 }

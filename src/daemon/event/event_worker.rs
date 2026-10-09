@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use futures_channel::{mpsc::UnboundedReceiver, oneshot::Sender};
 use nipart::{
-    BaseInterface, ErrorKind, Interface, InterfaceAutoConnect, InterfaceIpv4,
-    InterfaceIpv6, InterfaceLinkEvent, InterfaceLinkState, InterfaceState,
-    InterfaceType, MergedNetworkState, NetworkState, NipartApplyOption,
-    NipartError, NipartInterface, NipartNoDaemon, NipartQueryOption,
-    RouteEntry, RouteRuleEntry, RouteState,
+    BaseInterface, ErrorKind, Interface, InterfaceAutoConnect,
+    InterfaceIdentifier, InterfaceIpv4, InterfaceIpv6, InterfaceLinkEvent,
+    InterfaceLinkState, InterfaceState, InterfaceType, MergedNetworkState,
+    NetworkState, NipartApplyOption, NipartError, NipartInterface,
+    NipartNoDaemon, NipartQueryOption, RouteEntry, RouteRuleEntry, RouteState,
 };
 
 use super::super::{commander::NipartCommander, task::TaskWorker};
@@ -125,6 +125,11 @@ impl NipartEventWorker {
         let mut desired_state = NetworkState::default();
         let mut wifi_plugin_state = NetworkState::default();
         let mut rearm_monitors = false;
+        // Virtual interfaces already added to `desired_state` because a
+        // physical port/parent of them appeared in this batch.  Several
+        // events can name ports of the same missing controller.
+        let mut added_virtual_dependents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for mut event in events {
             // Kernel event is always for kernel interface
@@ -340,6 +345,48 @@ impl NipartEventWorker {
                     }
                 }
             }
+
+            // The event may be the first time the kernel interface exists:
+            // create the saved virtual interfaces depending on it (a
+            // controller whose port it is, a VLAN on top of it, ...).
+            for saved_iface in
+                gen_missing_virtual_dependents(&event, &saved_state, &cur_state)
+            {
+                if !added_virtual_dependents
+                    .insert(saved_iface.name().to_string())
+                {
+                    continue;
+                }
+                log::info!(
+                    "Creating saved virtual interface {}/{} because its \
+                     parent/port {} appeared",
+                    saved_iface.name(),
+                    saved_iface.iface_type(),
+                    event.iface_name
+                );
+                let (new_iface, routes) =
+                    gen_desired_iface_up(&saved_iface, &saved_state);
+                let is_up = new_iface.base_iface().state.is_up();
+                desired_state.ifaces.push(new_iface);
+                let config_routes =
+                    desired_state.routes.config.get_or_insert_default();
+                for route in routes {
+                    log::trace!("Pending apply route {route}");
+                    config_routes.push(route);
+                }
+                if is_up {
+                    let config_rules = desired_state
+                        .route_rules
+                        .config
+                        .get_or_insert_default();
+                    for rule in
+                        gen_route_rules_for_iface_up(&saved_iface, &saved_state)
+                    {
+                        log::trace!("Pending apply route rule {rule}");
+                        config_rules.push(rule);
+                    }
+                }
+            }
         } // end of the events loop
 
         if rearm_monitors {
@@ -456,6 +503,106 @@ fn gen_wifi_plugin_state_for_phy(
         ret.ifaces.push(iface);
     }
     ret
+}
+
+/// Saved virtual interfaces which depend on the event's kernel interface but
+/// do not exist in the kernel yet, so the event is the first chance to
+/// create them.
+///
+/// A controller (bond, bridge, VRF, ...) whose port list names the event
+/// interface is included when the controller is absent: the port's own saved
+/// config carries its `controller`, but that can only attach to an existing
+/// controller.  A virtual interface whose parent is the event interface
+/// (VLAN, VXLAN, ...) is included the same way, so it is created once its
+/// parent exists.
+///
+/// `auto-connect: false` and `state: absent` configs are never created
+/// implicitly.
+fn gen_missing_virtual_dependents(
+    event: &InterfaceLinkEvent,
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+) -> Vec<Interface> {
+    let mut ret: Vec<Interface> = Vec::new();
+    for saved_iface in saved_state.ifaces.iter() {
+        if !saved_iface.is_virtual()
+            || saved_iface.is_userspace()
+            || saved_iface.is_absent()
+            || saved_iface.base_iface().auto_connect.as_ref()
+                == Some(&InterfaceAutoConnect::Manual)
+        {
+            continue;
+        }
+        if !virtual_depends_on_event(saved_iface, event, saved_state, cur_state)
+        {
+            continue;
+        }
+        if cur_state
+            .ifaces
+            .kernel_ifaces
+            .contains_key(saved_iface.kernel_iface_name())
+        {
+            continue;
+        }
+        ret.push(saved_iface.clone());
+    }
+    ret
+}
+
+/// Whether the saved virtual interface is built on the event's kernel
+/// interface: a controller with it in the port list, a controller named by
+/// the port's saved `controller` property, or a child (VLAN, VXLAN, ...)
+/// whose parent it is.
+fn virtual_depends_on_event(
+    saved_iface: &Interface,
+    event: &InterfaceLinkEvent,
+    saved_state: &NetworkState,
+    cur_state: &NetworkState,
+) -> bool {
+    if saved_iface
+        .ports()
+        .is_some_and(|ports| ports.iter().any(|port| *port == event.iface_name))
+    {
+        return true;
+    }
+    // A port may identify its controller while the port's own saved name is
+    // a logical one (e.g. a MAC-identified NIC): match those through the
+    // port config.
+    if saved_state.ifaces.iter().any(|port_iface| {
+        port_iface.base_iface().controller.as_deref()
+            == Some(saved_iface.name())
+            && saved_iface_matches_event(port_iface, event, cur_state)
+    }) {
+        return true;
+    }
+    saved_iface.parent() == Some(event.iface_name.as_str())
+}
+
+/// Whether the saved interface is the kernel interface the event reports:
+/// same kernel/logical name, or same MAC address for a MAC-identified
+/// profile.
+fn saved_iface_matches_event(
+    iface: &Interface,
+    event: &InterfaceLinkEvent,
+    cur_state: &NetworkState,
+) -> bool {
+    if iface.kernel_iface_name() == event.iface_name
+        || iface.name() == event.iface_name
+    {
+        return true;
+    }
+    if iface.base_iface().identifier != Some(InterfaceIdentifier::MacAddress) {
+        return false;
+    }
+    let Some(saved_mac) = iface.base_iface().mac_address.as_deref() else {
+        return false;
+    };
+    cur_state
+        .ifaces
+        .kernel_ifaces
+        .get(&event.iface_name)
+        .and_then(|cur_iface| cur_iface.base_iface().mac_address.as_deref())
+        .is_some_and(|cur_mac| cur_mac.eq_ignore_ascii_case(saved_mac))
 }
 
 pub(crate) fn is_route_matching_iface(
