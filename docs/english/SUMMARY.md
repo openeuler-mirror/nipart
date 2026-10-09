@@ -19,3 +19,7 @@
 * [Wireguard](features/wireguard.md)
 * [DNS](features/dns.md)
 * [Plugin Design](features/plugin_design.md)
+
+## Design
+* [Interface Monitor](design/monitor.md)
+* [Quick Boot Plan](design/plan.md)

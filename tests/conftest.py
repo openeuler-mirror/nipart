@@ -21,14 +21,14 @@ DAEMON_LOG = "/tmp/nipart_test_daemon.log"
 CLI_PATH = f"{project_dir}/target/debug/npt"
 DAEMON_PID_FILE = "/var/run/nipart/nipart.pid"
 DAEMON_BIN_PATH = f"{project_dir}/target/debug/nipart"
-# The daemon answers IPC requests while `load_saved_state()` still runs in
-# a background task.  That boot pass pauses the interface monitor, so a
-# test starting right after `start_daemon()` could miss live link events
-# and race with the boot apply.  Wait for the boot pass to finish before
+# The daemon answers IPC requests while `boot_apply()` and the initial
+# link-event batch apply still run in a background task.  That boot pass
+# applies the saved state, so a test starting right after `start_daemon()`
+# could race with the boot apply.  Wait for the boot pass to finish before
 # handing the daemon over to tests.
 DAEMON_BOOT_DONE_MARKS = (
-    "Saved state load finished",
-    "Failed to load saved state:",
+    "Boot saved state applied",
+    "Failed to apply boot saved state:",
 )
 DAEMON_BOOT_TIMEOUT = 60
 
@@ -120,7 +120,7 @@ def _wait_daemon_boot_done(log_pos):
     if not retry_till_true_or_timeout(
         DAEMON_BOOT_TIMEOUT, _boot_done_since, log_pos
     ):
-        raise RuntimeError("Daemon did not finish loading saved state")
+        raise RuntimeError("Daemon did not finish boot activation")
 
 
 def start_daemon():

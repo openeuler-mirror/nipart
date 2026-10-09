@@ -10,7 +10,7 @@ use nipart::{
 
 use super::{
     gen_desired_iface_down, gen_routes_for_iface_up,
-    gen_routes_for_wifi_cfg_up, gen_wifi_plugin_state,
+    gen_routes_for_wifi_cfg_up, gen_wifi_plugin_state_for_phy,
     handle_event_auto_connect, handle_wifi_phy_event, is_route_matching_iface,
     is_stale_link_down_event, nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
 };
@@ -204,33 +204,68 @@ fn test_is_route_matching_iface() {
 }
 
 #[test]
-fn test_gen_wifi_plugin_state_filters_non_wifi_ifaces() {
+fn test_gen_wifi_plugin_state_matches_phy_only() {
     let state: NetworkState = rmsd_yaml::from_str(
         r#"---
             interfaces:
               - name: eth0
                 type: ethernet
                 state: up
+              - name: wlan0
+                type: wifi-phy
+                state: up
               - name: Test-WIFI
                 type: wifi-cfg
                 state: up
                 wifi:
                   ssid: Test-WIFI
-              - name: wlan0
-                type: wifi-phy
+                  base-iface: wlan0
+              - name: Other-WIFI
+                type: wifi-cfg
                 state: up
+                wifi:
+                  ssid: Other-WIFI
+                  base-iface: wlan1
+              - name: Any-WIFI
+                type: wifi-cfg
+                state: up
+                wifi:
+                  ssid: Any-WIFI
             "#,
     )
     .unwrap();
 
-    let wifi_state = gen_wifi_plugin_state(&state);
-    assert_eq!(wifi_state.ifaces.iter().count(), 2);
-    assert!(wifi_state.ifaces.iter().all(|iface| {
-        matches!(
-            iface.iface_type(),
-            InterfaceType::WifiCfg | InterfaceType::WifiPhy
-        )
-    }));
+    let wifi_state = gen_wifi_plugin_state_for_phy("wlan0", &state);
+    // eth0, the wifi-phy for wlan1 and the profile bound to wlan1 are out;
+    // the bound and the unbound profiles are in.
+    assert_eq!(wifi_state.ifaces.iter().count(), 3);
+    let names: Vec<&str> = wifi_state.ifaces.iter().map(|i| i.name()).collect();
+    assert!(names.contains(&"wlan0"));
+    assert!(names.contains(&"Test-WIFI"));
+    assert!(names.contains(&"Any-WIFI"));
+}
+
+#[test]
+fn test_gen_wifi_plugin_state_skips_phy_without_config() {
+    let state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: wlan0
+                type: wifi-phy
+                state: up
+              - name: Manual-WIFI
+                type: wifi-cfg
+                state: up
+                auto-connect: false
+                wifi:
+                  ssid: Manual-WIFI
+            "#,
+    )
+    .unwrap();
+
+    // A wifi-phy without any matching SSID profile is not a wifi config:
+    // the plugin must not be contacted for it.
+    assert!(gen_wifi_plugin_state_for_phy("wlan0", &state).is_empty());
 }
 
 fn gen_link_event(iface_name: &str, is_up: bool) -> InterfaceLinkEvent {

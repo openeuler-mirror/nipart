@@ -23,7 +23,14 @@ const WIFI_SSID_QUERY_RETRY_INTERVAL_MS: u64 = 500;
 #[derive(Debug, Clone)]
 pub(crate) enum NipartEventCmd {
     SetCommander(Box<NipartCommander>),
-    HandleEvent(Box<InterfaceLinkEvent>),
+    /// One or more link-state events from a single dump or a single live
+    /// notification.  The worker coalesces them into one apply.  `boot`
+    /// marks the initial daemon-start dump whose apply performs boot
+    /// activation.
+    HandleEvents {
+        events: Box<[InterfaceLinkEvent]>,
+        boot: bool,
+    },
 }
 
 impl std::fmt::Display for NipartEventCmd {
@@ -32,8 +39,8 @@ impl std::fmt::Display for NipartEventCmd {
             Self::SetCommander(_) => {
                 write!(f, "set-commander")
             }
-            Self::HandleEvent(event) => {
-                write!(f, "handle-event:{event}")
+            Self::HandleEvents { events, boot } => {
+                write!(f, "handle-events:{}:boot={boot}", events.len())
             }
         }
     }
@@ -81,8 +88,10 @@ impl TaskWorker for NipartEventWorker {
             NipartEventCmd::SetCommander(commander) => {
                 self.commander = Some(*commander);
             }
-            NipartEventCmd::HandleEvent(event) => {
-                if let Err(e) = self.handle_event(*event).await {
+            NipartEventCmd::HandleEvents { events, boot } => {
+                if let Err(e) =
+                    self.handle_events(events.into_vec(), boot).await
+                {
                     log::error!("{e}");
                 }
             }
@@ -92,222 +101,202 @@ impl TaskWorker for NipartEventWorker {
 }
 
 impl NipartEventWorker {
-    async fn handle_event(
+    async fn handle_events(
         &mut self,
-        mut event: InterfaceLinkEvent,
+        events: Vec<InterfaceLinkEvent>,
+        boot: bool,
     ) -> Result<(), NipartError> {
         let Some(commander) = self.commander.as_mut() else {
             return Err(NipartError::new(
                 ErrorKind::Bug,
-                "NipartEventWorker::handle_event() invoked without commander \
+                "NipartEventWorker::handle_events() invoked without commander \
                  set"
                 .to_string(),
             ));
         };
-        log::trace!("Handle link event {event}");
+        for event in events.iter() {
+            log::trace!("Handle link event {event}");
+        }
+        let event_count = events.len();
         let saved_state = commander.conf_manager.query_state().await?;
         let mut cur_state =
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
-
-        // Kernel event is always for kernel interface
-        let mut cur_iface =
-            cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
-
-        // Skip stale link-down events: when the interface's current link
-        // state is already up, a queued down event is a leftover of an
-        // earlier transient state (e.g. the device driver initialization
-        // burst at boot, or the monitor emitting the link dump on resume).
-        // Processing it would purge the IP and routes that the boot apply
-        // has just configured, and the later up event does not reliably
-        // restore them (the partial merge may drop routes of interfaces
-        // that are temporarily IP-disabled).
-        if is_stale_link_down_event(&event, cur_iface) {
-            log::trace!(
-                "Ignoring stale link-down event {event}: current link state \
-                 is up"
-            );
-            return Ok(());
-        }
-
-        if nic_is_gone(&event, cur_iface) {
-            // The kernel interface is already gone (delete event, or a
-            // link-down event processed after the device disappeared).
-            // There is nothing to purge in the kernel, and applying the
-            // saved MAC-identified config now would only fail.  Re-arm the
-            // saved-profile watches so the config is applied when the same
-            // NIC appears again, possibly under a different kernel name
-            // (e.g. a USB dock replug).
-            log::trace!("Interface {event} is gone, re-arming saved monitors");
-            commander
-                .monitor_manager
-                .setup_saved_state_monitors(&saved_state, true)
-                .await?;
-            return Ok(());
-        }
-
-        // A new wifi-phy appeared after the boot grace period: the wifi
-        // plugin is a fresh process (or never saw this phy), so give it the
-        // complete saved WIFI picture. Its apply worker will start a new
-        // shuli client covering this phy.
-        if event.is_new_wifi_phy && event.iface_type == InterfaceType::WifiPhy {
-            let wifi_state = gen_wifi_plugin_state(&saved_state);
-            if wifi_state.is_empty() {
-                log::debug!(
-                    "No saved WIFI config for new wifi-phy {}",
-                    event.iface_name
-                );
-            } else {
-                log::info!(
-                    "Applying saved WIFI config to plugin for new wifi-phy \
-                     {}: {wifi_state}",
-                    event.iface_name
-                );
-                commander
-                    .plugin_manager
-                    .apply_network_state(
-                        &wifi_state,
-                        &NipartApplyOption::new().memory_only(),
-                    )
-                    .await?;
-            }
-        }
-
-        if let Some(cur_iface) = cur_iface.as_ref() {
-            log::trace!("Current interface state: {cur_iface}");
-        }
-
-        // A wifi-phy up event may reach us before the kernel has finished
-        // publishing the associated SSID (especially on drivers using
-        // `NL80211_CMD_ASSOCIATE`).  Retry the query for a short while so
-        // the wifi-cfg IP config is not lost just because the first snapshot
-        // was taken too early.
-        if event.ssid.is_none()
-            && event.is_up
-            && event.iface_type == InterfaceType::WifiPhy
-        {
-            for retry_count in 1..=WIFI_SSID_QUERY_RETRY_TIMES {
-                if let Some(ssid) = wifi_phy_ssid(cur_iface) {
-                    event.ssid = Some(ssid);
-                    break;
-                }
-                if retry_count == WIFI_SSID_QUERY_RETRY_TIMES {
-                    log::trace!(
-                        "{}: SSID still unavailable after {} attempts",
-                        event.iface_name,
-                        retry_count
-                    );
-                    break;
-                }
-                log::trace!(
-                    "{}: wifi-phy up without SSID, retrying query \
-                     ({retry_count}/{WIFI_SSID_QUERY_RETRY_TIMES})",
-                    event.iface_name
-                );
-                tokio::time::sleep(Duration::from_millis(
-                    WIFI_SSID_QUERY_RETRY_INTERVAL_MS,
-                ))
-                .await;
-                cur_state = NipartNoDaemon::query_network_state(
-                    NipartQueryOption::running(),
-                )
-                .await?;
-                cur_iface =
-                    cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
-            }
-            if event.ssid.is_none() {
-                // nispor still cannot see the SSID although the wifi plugin
-                // may already know from its shuli connection state machine
-                // (e.g. the kernel has not yet published the authorized
-                // station).  Query the plugins and merge their live state.
-                log::trace!(
-                    "{}: SSID not visible via nispor, querying wifi plugin",
-                    event.iface_name
-                );
-                let plugin_states = commander
-                    .plugin_manager
-                    .query_network_state(
-                        NipartQueryOption::running(),
-                        &cur_state,
-                    )
-                    .await?;
-                for plugin_state in plugin_states {
-                    cur_state.merge(&plugin_state)?;
-                }
-                cur_iface =
-                    cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
-                if let Some(ssid) = wifi_phy_ssid(cur_iface) {
-                    event.ssid = Some(ssid);
-                }
-            }
-        }
-
         let mut desired_state = NetworkState::default();
+        let mut wifi_plugin_state = NetworkState::default();
+        let mut rearm_monitors = false;
 
-        // Purge IP if WIFI PHY interface is down or removed
-        if !event.is_up && event.iface_type == InterfaceType::WifiPhy {
-            let mut desired_iface = BaseInterface::new(
-                event.iface_name.to_string(),
-                event.iface_type.clone(),
-            );
-            desired_iface.state = if cur_iface.is_some() {
-                InterfaceState::Up
-            } else {
-                // WIFI PHY interface removed.
-                InterfaceState::Absent
-            };
-            // Purge IP
-            desired_iface.ipv4 = Some(InterfaceIpv4::new_disabled());
-            desired_iface.ipv6 = Some(InterfaceIpv6::new_disabled());
-            log::trace!(
-                "{}: link down on wifi-phy, purging IP stack: {desired_iface}",
-                event.iface_name
-            );
-            desired_state.ifaces.push(desired_iface.into());
-        }
+        for mut event in events {
+            // Kernel event is always for kernel interface
+            let mut cur_iface =
+                cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
 
-        for saved_iface in saved_state.ifaces.iter() {
-            if event.iface_type == InterfaceType::WifiPhy
-                && let Some(new_iface) =
-                    handle_wifi_phy_event(&event, saved_iface)
+            // Skip stale link-down events: when the interface's current link
+            // state is already up, a queued down event is a leftover of an
+            // earlier transient state (e.g. the device driver initialization
+            // burst at boot, or the monitor emitting the link dump on resume).
+            // Processing it would purge the IP and routes that the boot apply
+            // has just configured, and the later up event does not reliably
+            // restore them (the partial merge may drop routes of interfaces
+            // that are temporarily IP-disabled).
+            if is_stale_link_down_event(&event, cur_iface) {
+                log::trace!(
+                    "Ignoring stale link-down event {event}: current link \
+                     state is up"
+                );
+                continue;
+            }
+
+            if nic_is_gone(&event, cur_iface) {
+                // The kernel interface is already gone (delete event, or a
+                // link-down event processed after the device disappeared).
+                // There is nothing to purge in the kernel, and applying the
+                // saved MAC-identified config now would only fail.  Re-arm the
+                // saved-profile watches so the config is applied when the same
+                // NIC appears again, possibly under a different kernel name
+                // (e.g. a USB dock replug).
+                log::trace!(
+                    "Interface {event} is gone, re-arming saved monitors"
+                );
+                rearm_monitors = true;
+                continue;
+            }
+
+            // A new wifi-phy appeared after the boot grace period: the wifi
+            // plugin is a fresh process (or never saw this phy), so give it the
+            // saved WIFI config matching this phy.  Its apply worker will start
+            // a new shuli client covering the phy.
+            if event.is_new_wifi_phy
+                && event.iface_type == InterfaceType::WifiPhy
             {
-                log::trace!("Pending apply config: {new_iface}");
-                desired_state.ifaces.push(new_iface);
-                let config_routes =
-                    desired_state.routes.config.get_or_insert_default();
-                for route in
-                    gen_routes_for_wifi_cfg_up(saved_iface, &saved_state)
-                {
-                    log::trace!("Pending apply route {route}");
-                    config_routes.push(route);
-                }
-                let config_rules =
-                    desired_state.route_rules.config.get_or_insert_default();
-                for rule in
-                    gen_route_rules_for_iface_up(saved_iface, &saved_state)
-                {
-                    log::trace!("Pending apply route rule {rule}");
-                    config_rules.push(rule);
+                let wifi_state = gen_wifi_plugin_state_for_phy(
+                    &event.iface_name,
+                    &saved_state,
+                );
+                if wifi_state.is_empty() {
+                    log::debug!(
+                        "No saved WIFI config for new wifi-phy {}",
+                        event.iface_name
+                    );
+                } else {
+                    log::info!(
+                        "Handing saved WIFI config to plugin for new wifi-phy \
+                         {}: {wifi_state}",
+                        event.iface_name
+                    );
+                    for iface in wifi_state.ifaces.iter() {
+                        wifi_plugin_state.ifaces.push(iface.clone());
+                    }
                 }
             }
 
-            // `auto-connect` defaults to `true` when not defined, hence
-            // interfaces without `auto-connect` are handled here as well.
-            if let Some((new_iface, routes)) = handle_event_auto_connect(
-                &event,
-                saved_iface,
-                &saved_state,
-                &cur_state,
-            ) {
-                let is_up = new_iface.base_iface().state.is_up();
-                desired_state.ifaces.push(new_iface);
-                let config_routes =
-                    desired_state.routes.config.get_or_insert_default();
-                for route in routes {
-                    log::trace!("Pending apply route {route}");
-                    config_routes.push(route);
+            if let Some(cur_iface) = cur_iface.as_ref() {
+                log::trace!("Current interface state: {cur_iface}");
+            }
+
+            // A wifi-phy up event may reach us before the kernel has finished
+            // publishing the associated SSID (especially on drivers using
+            // `NL80211_CMD_ASSOCIATE`).  Retry the query for a short while so
+            // the wifi-cfg IP config is not lost just because the first
+            // snapshot was taken too early.
+            if event.ssid.is_none()
+                && event.is_up
+                && event.iface_type == InterfaceType::WifiPhy
+            {
+                for retry_count in 1..=WIFI_SSID_QUERY_RETRY_TIMES {
+                    if let Some(ssid) = wifi_phy_ssid(cur_iface) {
+                        event.ssid = Some(ssid);
+                        break;
+                    }
+                    if retry_count == WIFI_SSID_QUERY_RETRY_TIMES {
+                        log::trace!(
+                            "{}: SSID still unavailable after {} attempts",
+                            event.iface_name,
+                            retry_count
+                        );
+                        break;
+                    }
+                    log::trace!(
+                        "{}: wifi-phy up without SSID, retrying query \
+                         ({retry_count}/{WIFI_SSID_QUERY_RETRY_TIMES})",
+                        event.iface_name
+                    );
+                    tokio::time::sleep(Duration::from_millis(
+                        WIFI_SSID_QUERY_RETRY_INTERVAL_MS,
+                    ))
+                    .await;
+                    cur_state = NipartNoDaemon::query_network_state(
+                        NipartQueryOption::running(),
+                    )
+                    .await?;
+                    cur_iface =
+                        cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
                 }
-                if is_up {
+                if event.ssid.is_none() {
+                    // nispor still cannot see the SSID although the wifi plugin
+                    // may already know from its shuli connection state machine
+                    // (e.g. the kernel has not yet published the authorized
+                    // station).  Query the plugins and merge their live state.
+                    log::trace!(
+                        "{}: SSID not visible via nispor, querying wifi plugin",
+                        event.iface_name
+                    );
+                    let plugin_states = commander
+                        .plugin_manager
+                        .query_network_state(
+                            NipartQueryOption::running(),
+                            &cur_state,
+                        )
+                        .await?;
+                    for plugin_state in plugin_states {
+                        cur_state.merge(&plugin_state)?;
+                    }
+                    cur_iface =
+                        cur_state.ifaces.kernel_ifaces.get(&event.iface_name);
+                    if let Some(ssid) = wifi_phy_ssid(cur_iface) {
+                        event.ssid = Some(ssid);
+                    }
+                }
+            }
+
+            // Purge IP if WIFI PHY interface is down or removed
+            if !event.is_up && event.iface_type == InterfaceType::WifiPhy {
+                let mut desired_iface = BaseInterface::new(
+                    event.iface_name.to_string(),
+                    event.iface_type.clone(),
+                );
+                desired_iface.state = if cur_iface.is_some() {
+                    InterfaceState::Up
+                } else {
+                    // WIFI PHY interface removed.
+                    InterfaceState::Absent
+                };
+                // Purge IP
+                desired_iface.ipv4 = Some(InterfaceIpv4::new_disabled());
+                desired_iface.ipv6 = Some(InterfaceIpv6::new_disabled());
+                log::trace!(
+                    "{}: link down on wifi-phy, purging IP stack: \
+                     {desired_iface}",
+                    event.iface_name
+                );
+                desired_state.ifaces.push(desired_iface.into());
+            }
+
+            for saved_iface in saved_state.ifaces.iter() {
+                if event.iface_type == InterfaceType::WifiPhy
+                    && let Some(new_iface) =
+                        handle_wifi_phy_event(&event, saved_iface)
+                {
+                    log::trace!("Pending apply config: {new_iface}");
+                    desired_state.ifaces.push(new_iface);
+                    let config_routes =
+                        desired_state.routes.config.get_or_insert_default();
+                    for route in
+                        gen_routes_for_wifi_cfg_up(saved_iface, &saved_state)
+                    {
+                        log::trace!("Pending apply route {route}");
+                        config_routes.push(route);
+                    }
                     let config_rules = desired_state
                         .route_rules
                         .config
@@ -319,46 +308,152 @@ impl NipartEventWorker {
                         config_rules.push(rule);
                     }
                 }
+
+                // `auto-connect` defaults to `true` when not defined, hence
+                // interfaces without `auto-connect` are handled here as well.
+                if let Some((new_iface, routes)) = handle_event_auto_connect(
+                    &event,
+                    saved_iface,
+                    &saved_state,
+                    &cur_state,
+                ) {
+                    let is_up = new_iface.base_iface().state.is_up();
+                    desired_state.ifaces.push(new_iface);
+                    let config_routes =
+                        desired_state.routes.config.get_or_insert_default();
+                    for route in routes {
+                        log::trace!("Pending apply route {route}");
+                        config_routes.push(route);
+                    }
+                    if is_up {
+                        let config_rules = desired_state
+                            .route_rules
+                            .config
+                            .get_or_insert_default();
+                        for rule in gen_route_rules_for_iface_up(
+                            saved_iface,
+                            &saved_state,
+                        ) {
+                            log::trace!("Pending apply route rule {rule}");
+                            config_rules.push(rule);
+                        }
+                    }
+                }
             }
+        } // end of the events loop
+
+        if rearm_monitors {
+            commander
+                .monitor_manager
+                .setup_saved_state_monitors(&saved_state, true)
+                .await?;
+        }
+
+        if !wifi_plugin_state.is_empty() {
+            commander
+                .plugin_manager
+                .apply_network_state(
+                    &wifi_plugin_state,
+                    &NipartApplyOption::new().memory_only(),
+                )
+                .await?;
         }
 
         if !desired_state.is_empty() {
             log::trace!("Applying desired state {desired_state}");
-            let merged_state = MergedNetworkState::new(
-                desired_state,
-                cur_state,
-                None,
-                NipartApplyOption::new().no_verify(),
-            )?;
-            commander.apply_merged_state(None, &merged_state).await?;
-            // The event path applies the saved config directly (no
-            // `apply_network_state`), so refresh the monitor setup here:
-            // the applied interface gets its kernel-name watch, and a stale
-            // MAC watch of an interface that has just become active is
-            // dropped.
-            commander
-                .monitor_manager
-                .setup_monitor(&merged_state, &saved_state)
-                .await?;
+            let opt = if boot {
+                NipartApplyOption::new()
+                    .no_verify()
+                    .memory_only()
+                    .restart_auto_ip()
+            } else {
+                NipartApplyOption::new().no_verify()
+            };
+            let merged_state =
+                MergedNetworkState::new(desired_state, cur_state, None, opt)?;
+            // Suppress the monitor during the apply so the self-generated
+            // link events cannot re-trigger an apply.
+            commander.monitor_manager.pause().await?;
+            let apply_result =
+                commander.apply_merged_state(None, &merged_state).await;
+            let setup_result = if apply_result.is_ok() {
+                // The event path applies the saved config directly (no
+                // `apply_network_state`), so refresh the monitor setup
+                // here: the applied interface gets its kernel-name watch,
+                // and a stale MAC watch of an interface that has just
+                // become active is dropped.
+                commander
+                    .monitor_manager
+                    .setup_monitor(&merged_state, &saved_state)
+                    .await
+            } else {
+                Ok(())
+            };
+            commander.monitor_manager.resume().await?;
+            apply_result?;
+            setup_result?;
         } else {
-            log::trace!("No change required for event {event}");
+            log::trace!("No change required for {event_count} event(s)");
         }
+
+        // Shared online-state evaluation: a link or DHCP change may have
+        // made the wait-online conditions true without a client apply.
+        commander.update_daemon_online_state().await?;
 
         Ok(())
     }
 }
 
-/// Extract every saved WIFI interface so the plugin can rebuild its full
-/// network list when a new wifi-phy shows up.
-fn gen_wifi_plugin_state(saved_state: &NetworkState) -> NetworkState {
-    let mut ret = NetworkState::default();
+/// Extract the saved WIFI interfaces matching `phy_name` so the plugin can
+/// rebuild the network list for a newly appeared wifi-phy.
+///
+/// Only the `wifi-phy` entries identifying `phy_name` and the `wifi-cfg`
+/// profiles bound to it (explicit `base-iface` or unbound) are included;
+/// configs with `auto-connect: false` are left for an explicit request.
+/// An empty result means the wifi plugin must not be contacted for this
+/// phy at all.
+fn gen_wifi_plugin_state_for_phy(
+    phy_name: &str,
+    saved_state: &NetworkState,
+) -> NetworkState {
+    let mut phy_ifaces: Vec<Interface> = Vec::new();
+    let mut cfg_ifaces: Vec<Interface> = Vec::new();
+    let mut phy_has_ssid = false;
     for iface in saved_state.ifaces.iter() {
-        if matches!(
-            iface.iface_type(),
-            InterfaceType::WifiCfg | InterfaceType::WifiPhy
-        ) {
-            ret.ifaces.push(iface.clone());
+        let base = iface.base_iface();
+        if base.auto_connect.as_ref() == Some(&InterfaceAutoConnect::Manual) {
+            continue;
         }
+        match iface {
+            Interface::WifiPhy(wifi_iface) => {
+                if wifi_iface.base.kernel_iface_name == phy_name
+                    || wifi_iface.base.name == phy_name
+                    || wifi_iface.base.profile_name.as_deref() == Some(phy_name)
+                {
+                    phy_has_ssid |= wifi_iface.ssid().is_some();
+                    phy_ifaces.push(iface.clone());
+                }
+            }
+            Interface::WifiCfg(wifi_iface) => {
+                let base_iface = wifi_iface
+                    .wifi
+                    .as_ref()
+                    .and_then(|wifi| wifi.base_iface.as_deref());
+                if base_iface.is_none_or(|base_iface| base_iface == phy_name) {
+                    cfg_ifaces.push(iface.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ret = NetworkState::default();
+    // A wifi-phy alone (no saved SSID on the phy, no wifi-cfg profile) is
+    // not a wifi config: do not contact the plugin for it.
+    if cfg_ifaces.is_empty() && !phy_has_ssid {
+        return ret;
+    }
+    for iface in phy_ifaces.into_iter().chain(cfg_ifaces) {
+        ret.ifaces.push(iface);
     }
     ret
 }

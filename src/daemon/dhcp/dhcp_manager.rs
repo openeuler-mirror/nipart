@@ -73,20 +73,6 @@ impl NipartDhcpV4Manager {
         Ok(())
     }
 
-    /// The kernel interface names that currently have a DHCP client
-    /// thread running.
-    pub(crate) async fn running_ifaces(
-        &mut self,
-    ) -> Result<std::collections::HashSet<String>, NipartError> {
-        let mut ret = std::collections::HashSet::new();
-        if let NipartDhcpReply::QueryReply(threads) =
-            self.mgr.exec(NipartDhcpCmd::Query).await?
-        {
-            ret.extend(threads.into_keys());
-        }
-        Ok(ret)
-    }
-
     /// Nameservers learned from the current DHCPv4 leases, keyed by
     /// interface name.
     pub(crate) async fn nameservers(
@@ -132,13 +118,20 @@ impl NipartDhcpV4Manager {
         for merged_iface in merged_state
             .ifaces
             .iter()
-            .filter(|i| i.is_changed() && !i.merged.is_userspace())
+            .filter(|i| !i.merged.is_userspace())
         {
+            // `restart_auto_ip` (the boot hand-off) must restart the DHCP
+            // client even for an interface whose kernel state already
+            // matches: the client process died with the previous daemon.
+            if !merged_iface.is_changed()
+                && !merged_state.option.restart_auto_ip
+            {
+                continue;
+            }
             let mut apply_iface = match merged_iface.for_apply.as_ref() {
                 Some(i) => i.clone(),
-                None => {
-                    continue;
-                }
+                // No diff: only the `restart_auto_ip` path reaches here.
+                None => merged_iface.merged.clone(),
             };
             if apply_iface.base_iface().mac_address.is_none() {
                 apply_iface.base_iface_mut().mac_address =
@@ -171,6 +164,14 @@ impl NipartDhcpV4Manager {
                 ipv4_changed,
                 apply_iface.is_up(),
             ) {
+                continue;
+            }
+            // The restart-only path must never stop DHCP on an unchanged
+            // interface (e.g. a static-IP interface in the same boot batch).
+            if !merged_iface.is_changed()
+                && apply_iface.base_iface().ipv4.as_ref().map(|i| i.is_auto())
+                    != Some(true)
+            {
                 continue;
             }
             if apply_iface.is_up() {

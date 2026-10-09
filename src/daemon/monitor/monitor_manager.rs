@@ -53,6 +53,15 @@ impl NipartMonitorManager {
         Ok(())
     }
 
+    /// Begin monitoring: open the netlink session and emit the current link
+    /// state to the event worker as one batch.  Called once at daemon start
+    /// after all watches are registered; before it, the monitor only
+    /// registers watches and emits nothing.
+    pub(crate) async fn start(&mut self) -> Result<(), NipartError> {
+        self.mgr.exec(NipartMonitorCmd::Start).await?;
+        Ok(())
+    }
+
     /// Record the interface/profile as explicitly downed by `npt down` so
     /// its link events are not forwarded to the event worker.
     pub(crate) async fn mark_explicitly_down(
@@ -288,23 +297,6 @@ impl NipartMonitorManager {
     /// Disable WIFI SSID monitoring.
     async fn disable_wifi_monitor(&mut self) -> Result<(), NipartError> {
         self.mgr.exec(NipartMonitorCmd::DisableWifiMonitor).await?;
-        Ok(())
-    }
-
-    /// Record wifi-phy kernel names the daemon has already handed to the
-    /// wifi plugin (the boot pass does this for every phy it applied).
-    ///
-    /// Without it, the first link event after the boot pass would be
-    /// announced as a new phy and the event worker would re-apply the
-    /// saved wifi-cfg set to a plugin that is already connecting with
-    /// exactly those networks.
-    pub(crate) async fn mark_wifi_phys_known(
-        &mut self,
-        iface_names: &[String],
-    ) -> Result<(), NipartError> {
-        self.mgr
-            .exec(NipartMonitorCmd::MarkWifiPhysKnown(iface_names.to_vec()))
-            .await?;
         Ok(())
     }
 

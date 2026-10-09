@@ -41,8 +41,19 @@ impl NipartEventManager {
         &mut self,
         event: InterfaceLinkEvent,
     ) -> Result<(), NipartError> {
+        self.handle_events(vec![event], false).await
+    }
+
+    pub(crate) async fn handle_events(
+        &mut self,
+        events: Vec<InterfaceLinkEvent>,
+        boot: bool,
+    ) -> Result<(), NipartError> {
         self.mgr
-            .exec(NipartEventCmd::HandleEvent(Box::new(event)))
+            .exec(NipartEventCmd::HandleEvents {
+                events: events.into_boxed_slice(),
+                boot,
+            })
             .await?;
         Ok(())
     }
