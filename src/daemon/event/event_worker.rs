@@ -322,7 +322,6 @@ impl NipartEventWorker {
                     &saved_state,
                     &cur_state,
                 ) {
-                    let is_up = new_iface.base_iface().state.is_up();
                     desired_state.ifaces.push(new_iface);
                     let config_routes =
                         desired_state.routes.config.get_or_insert_default();
@@ -330,18 +329,19 @@ impl NipartEventWorker {
                         log::trace!("Pending apply route {route}");
                         config_routes.push(route);
                     }
-                    if is_up {
-                        let config_rules = desired_state
-                            .route_rules
-                            .config
-                            .get_or_insert_default();
-                        for rule in gen_route_rules_for_iface_up(
-                            saved_iface,
-                            &saved_state,
-                        ) {
-                            log::trace!("Pending apply route rule {rule}");
-                            config_rules.push(rule);
-                        }
+                    // Route rules only need the interface to exist, not to
+                    // have carrier: apply them on a down event too, otherwise
+                    // a rule deferred from boot (e.g. `iif: eth0` with the
+                    // cable unplugged) would never be installed.
+                    let config_rules = desired_state
+                        .route_rules
+                        .config
+                        .get_or_insert_default();
+                    for rule in
+                        gen_route_rules_for_iface_up(saved_iface, &saved_state)
+                    {
+                        log::trace!("Pending apply route rule {rule}");
+                        config_rules.push(rule);
                     }
                 }
             }
