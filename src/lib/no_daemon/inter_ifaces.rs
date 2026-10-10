@@ -212,14 +212,11 @@ async fn apply_ifaces_link_changes(
     // because port might be virtual interface which is about to created.
     // Hence we handle port config in this separate loop.
     for merged_iface in
-        sorted_changed_mergd_ifaces
-            .as_slice()
-            .iter()
-            .filter(|merged_iface| {
-                merged_iface.merged.is_controller()
-                    && merged_iface.is_desired()
-                    && merged_iface.merged.is_up()
-            })
+        sorted_changed_mergd_ifaces.iter().filter(|merged_iface| {
+            merged_iface.merged.is_controller()
+                && merged_iface.is_desired()
+                && merged_iface.merged.is_up()
+        })
     {
         let apply_iface = if let Some(i) = merged_iface.for_apply.as_ref() {
             i

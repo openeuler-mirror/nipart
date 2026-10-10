@@ -44,6 +44,32 @@ pub enum ErrorKind {
     DependencyError,
 }
 
+impl ErrorKind {
+    /// Whether an operation failed with this error kind may succeed when it
+    /// is retried.
+    ///
+    /// Deterministic errors (bad input, unsupported request, authentication
+    /// or permission failure, programming bug) will fail again, so retrying
+    /// them only delays the error report.  Everything else (a closed IPC
+    /// connection, a timeout, a plugin/daemon failure, a failed
+    /// verification, a missing dependency which may appear later) is
+    /// considered transient.
+    pub fn retriable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Bug
+                | Self::IpcMessageTooLarge
+                | Self::InvalidLogLevel
+                | Self::InvalidUuid
+                | Self::InvalidSchemaVersion
+                | Self::InvalidArgument
+                | Self::NoSupport
+                | Self::AuthenticationError
+                | Self::PermissionDeny
+        )
+    }
+}
+
 // Try not implement From for NipartError here unless you are sure this
 // error should always convert to certain type of ErrorKind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,5 +136,36 @@ impl From<std::net::AddrParseError> for NipartError {
 impl From<nispor::NisporError> for NipartError {
     fn from(e: nispor::NisporError) -> Self {
         Self::new(ErrorKind::Bug, format!("{}: {}", e.kind, e.msg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ErrorKind;
+
+    #[test]
+    fn test_retriable_error_kinds() {
+        // Bad input and other deterministic failures are not retried.
+        for kind in [
+            ErrorKind::Bug,
+            ErrorKind::InvalidArgument,
+            ErrorKind::NoSupport,
+            ErrorKind::AuthenticationError,
+            ErrorKind::PermissionDeny,
+        ] {
+            assert!(!kind.retriable(), "{kind} should not be retriable");
+        }
+        // Transient failures are retried.
+        for kind in [
+            ErrorKind::IpcClosed,
+            ErrorKind::IpcFailure,
+            ErrorKind::Timeout,
+            ErrorKind::PluginFailure,
+            ErrorKind::DaemonFailure,
+            ErrorKind::VerificationError,
+            ErrorKind::DependencyError,
+        ] {
+            assert!(kind.retriable(), "{kind} should be retriable");
+        }
     }
 }

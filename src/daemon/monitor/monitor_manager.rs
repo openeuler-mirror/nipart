@@ -53,6 +53,15 @@ impl NipartMonitorManager {
         Ok(())
     }
 
+    /// Begin monitoring: open the netlink session and emit the current link
+    /// state to the event worker as one batch.  Called once at daemon start
+    /// after all watches are registered; before it, the monitor only
+    /// registers watches and emits nothing.
+    pub(crate) async fn start(&mut self) -> Result<(), NipartError> {
+        self.mgr.exec(NipartMonitorCmd::Start).await?;
+        Ok(())
+    }
+
     /// Record the interface/profile as explicitly downed by `npt down` so
     /// its link events are not forwarded to the event worker.
     pub(crate) async fn mark_explicitly_down(
@@ -291,23 +300,6 @@ impl NipartMonitorManager {
         Ok(())
     }
 
-    /// Record wifi-phy kernel names the daemon has already handed to the
-    /// wifi plugin (the boot pass does this for every phy it applied).
-    ///
-    /// Without it, the first link event after the boot pass would be
-    /// announced as a new phy and the event worker would re-apply the
-    /// saved wifi-cfg set to a plugin that is already connecting with
-    /// exactly those networks.
-    pub(crate) async fn mark_wifi_phys_known(
-        &mut self,
-        iface_names: &[String],
-    ) -> Result<(), NipartError> {
-        self.mgr
-            .exec(NipartMonitorCmd::MarkWifiPhysKnown(iface_names.to_vec()))
-            .await?;
-        Ok(())
-    }
-
     /// Tell the monitor that the given interfaces changed while it was
     /// paused (e.g. a wifi-phy associated during an apply).
     ///
@@ -324,6 +316,24 @@ impl NipartMonitorManager {
         }
         self.mgr
             .exec(NipartMonitorCmd::ForgetPausedState(iface_names.to_vec()))
+            .await?;
+        Ok(())
+    }
+
+    /// Forget the last emitted link state and the known-wifi-phy mark of the
+    /// given interfaces, so the next reconciliation pass emits their event
+    /// again (and hands the saved WIFI profiles to the plugin again).  Used
+    /// to retry an apply which failed after the interfaces were already
+    /// recorded as emitted.
+    pub(crate) async fn forget_emitted(
+        &mut self,
+        iface_names: &[String],
+    ) -> Result<(), NipartError> {
+        if iface_names.is_empty() {
+            return Ok(());
+        }
+        self.mgr
+            .exec(NipartMonitorCmd::ForgetEmitted(iface_names.to_vec()))
             .await?;
         Ok(())
     }

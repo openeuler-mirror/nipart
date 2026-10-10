@@ -4034,3 +4034,43 @@ fn test_description_survives_merge_with_saved_state() {
         Some("Main interface connected to switch S1")
     );
 }
+
+/// A controller created/updated by a port-list-only apply: the port already
+/// exists and its own config is unchanged, but the controller relation
+/// changed.  Merging must produce a `for_apply` for the port carrying the
+/// controller instead of failing with an unreachable-code bug.
+#[test]
+fn test_unchanged_port_attached_to_new_controller() {
+    let desired: Interfaces = rmsd_yaml::from_str(
+        r#"---
+        - name: bond1
+          type: bond
+          state: up
+          bond:
+            mode: active-backup
+            ports:
+            - name: enp1s0
+        - name: enp1s0
+          type: ethernet
+          state: up
+        "#,
+    )
+    .unwrap();
+    let current: Interfaces = rmsd_yaml::from_str(
+        r#"---
+        - name: enp1s0
+          type: ethernet
+          state: up
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedInterfaces::new(desired, current, None).unwrap();
+    assert!(merged.kernel_ifaces.contains_key("bond1"));
+    let port = merged.kernel_ifaces.get("enp1s0").unwrap();
+    let for_apply = port
+        .for_apply
+        .as_ref()
+        .expect("port must be applied to attach the controller");
+    assert_eq!(for_apply.base_iface().controller.as_deref(), Some("bond1"));
+}

@@ -109,22 +109,18 @@ def test_saved_config_without_nic_not_blocking_boot_and_activated_on_hotplug():
 
         start_daemon()
 
-        # The boot apply must not keep retrying for the absent NIC: within
-        # a few seconds (the boot grace period) the config is left for the
-        # monitor worker, and the old "Failed to apply all saved state
-        # within 30 retries" error must never appear.
+        # The boot pass must not keep retrying for the absent NIC: boot
+        # activation finishes without the NIC, whose saved config stays
+        # watched (by MAC) so the monitor worker activates it on hotplug.
         assert retry_till_true_or_timeout(
             DEFAULT_TIMEOUT,
             _log_since,
             log_pos,
-            "is left for monitor worker to activate",
-        ), (
-            "Boot apply did not leave the absent-NIC config for the "
-            "monitor worker"
-        )
+            "Boot saved state applied",
+        ), "Boot pass did not finish with the absent-NIC config"
         assert not _log_since(
-            log_pos, "Failed to apply all saved state"
-        ), "Boot apply should not error out on the absent-NIC config"
+            log_pos, "Failed to apply boot saved state"
+        ), "Boot pass should not error out on the absent-NIC config"
 
         # Stay past the boot grace period: the config must remain dormant
         # (no route, no further boot retries) until the NIC actually

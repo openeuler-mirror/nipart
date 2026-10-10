@@ -68,3 +68,26 @@
   portal": legacy portals need probing anyway (later: probe after every
   DHCP lease/link-up).
 - Not covered yet: DHCPv6 option 103 and IPv6 RA option 37.
+
+## Test environment: `TestWifiPhyLater` hostapd startup flake
+
+`tests/wifi_test.py::TestWifiPhyLater::test_wifi_cfg_connects_when_phy_appears_after_daemon_start`
+fails in `start_hostapd_open()`: the AP is not visible to `iw <client>
+scan` within the 2 s retry window, and the leftover daemon/plugins/hwsim
+state then breaks later tests in the same run. Reproduced on the
+unmodified tree (kernel 7.2.7 dev VM), so it is not a nipart regression.
+Fix options: widen the retry, or verify the AP from its own side
+(`hostapd_cli status` / `iw dev <ap> info` inside the netns) instead of a
+concurrent client scan, which races with the nipart wifi plugin's own
+scan on the same NIC.
+
+## Test environment: `test_wifi_scan_dump_without_subcommand` order dependency
+
+`tests/wifi_test.py::TestWifi::test_wifi_scan_dump_without_subcommand`
+fails with `scan failed on test-wlan0: ... Network is down (os error 100)`
+when it runs after `test_wifi_iface_static_ip` and
+`test_wifi_iface_dhcpv4` in the same module: their `clean_up` leaves the
+client wifi-phy down while the module-scoped `wifi_env` fixture does not
+bring it back up. Reproduced on the unmodified tree. Fix options: bring
+the client phy up in the test (or in a function-scoped fixture), or move
+the scan-dump test into its own class with its own environment setup.

@@ -231,9 +231,10 @@ impl NipartInterface for BondInterface {
 
     fn ports(&self) -> Option<Vec<&str>> {
         self.bond.as_ref().and_then(|bond_conf| {
-            bond_conf.ports.as_ref().map(|ports| {
-                ports.as_slice().iter().map(|p| p.name.as_str()).collect()
-            })
+            bond_conf
+                .ports
+                .as_ref()
+                .map(|ports| ports.iter().map(|p| p.name.as_str()).collect())
         })
     }
 

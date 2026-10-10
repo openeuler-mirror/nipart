@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+use std::{fs::Permissions, os::unix::fs::PermissionsExt, sync::Arc};
 
 use futures_channel::mpsc::{UnboundedReceiver, unbounded};
 use futures_util::stream::StreamExt;
@@ -10,7 +10,7 @@ use nipart::{
 };
 use tokio::{
     signal::unix::{Signal, SignalKind},
-    sync::SetOnce,
+    sync::{Notify, SetOnce},
 };
 
 use super::{
@@ -28,6 +28,14 @@ const DNS_AUTO_REFRESH_INTERVAL: std::time::Duration =
 #[derive(Debug, Clone)]
 pub(crate) enum NipartManagerCmd {
     LinkEvent(Box<InterfaceLinkEvent>),
+    /// A batch of link-state events produced by one link dump. The event
+    /// worker coalesces them into a single apply.  `boot` marks the initial
+    /// daemon-start dump whose apply performs boot activation (`memory_only`
+    /// and DHCP clients restarted).
+    LinkEvents {
+        events: Box<[InterfaceLinkEvent]>,
+        boot: bool,
+    },
     /// A manager changed the host default gateway, e.g. the DHCP worker
     /// installed the default route of a new lease. The DNS cache is
     /// notified so the upstream groups which failed on the old network
@@ -54,6 +62,10 @@ pub(crate) struct NipartDaemon {
     dns_auto_timer: tokio::time::Interval,
     last_auto_dns_servers: Vec<std::net::IpAddr>,
     resume_monitor: NipartResumeMonitor,
+    /// Signalled once the initial boot link-event batch has been applied.
+    /// The boot task holds the transaction lock until then, so client
+    /// transactions wait for boot activation instead of racing it.
+    boot_applied: Arc<Notify>,
 }
 
 impl Drop for NipartDaemon {
@@ -100,26 +112,33 @@ impl NipartDaemon {
         let (sender, receiver) = unbounded::<NipartManagerCmd>();
 
         let commander = NipartCommander::new(sender).await?;
-        // The boot pass pauses the interface monitor and applies the saved
-        // state, so it must not interleave with a client transaction
-        // (`apply`, `up`, `down` or `wifi`). Acquire the transaction lock
-        // before spawning the task: `NipartDaemon::new()` returns, and API
-        // connections get accepted, only after the lock is held, so a
-        // client applying right after `npt ping` succeeds waits for the
-        // boot pass instead of racing it (the race made the client's link
-        // events fall into the boot pass' monitor pause window).
+        // The boot pass applies the non-NIC saved state (virtual
+        // interfaces, global routes/rules) and then starts the interface
+        // monitor, whose initial link dump is applied by the event worker as
+        // one batch.  The transaction lock is held until that first batch
+        // apply finishes, so a client `apply`, `up`, `down` or `wifi`
+        // issued right after `npt ping` succeeds waits for boot activation
+        // instead of racing it.
         let boot_lock =
             NipartLockManager::lock(std::process::id() as i32).await;
-        // Start a thread to load saved state instead of hanging
+        let boot_applied = Arc::new(Notify::new());
+        let boot_applied_wait = boot_applied.clone();
+        // Start a thread to run boot activation instead of hanging
         let mut new_commander = commander.clone();
         tokio::spawn(async move {
             let _boot_lock = boot_lock;
-            match new_commander.load_saved_state().await {
-                Ok(()) => log::info!("Saved state load finished"),
+            match new_commander.boot_apply().await {
+                Ok(()) => {
+                    // The monitor was started and will send the initial
+                    // batch (possibly empty); wait for the event worker to
+                    // apply it before releasing the lock.  The daemon logs
+                    // the batch result itself.
+                    boot_applied_wait.notified().await;
+                }
                 Err(e) => {
                     log::error!(
-                        "Failed to load saved state: {e}, starting with empty \
-                         state"
+                        "Failed to apply boot saved state: {e}, starting with \
+                         empty state"
                     );
                 }
             }
@@ -154,6 +173,7 @@ impl NipartDaemon {
             dns_auto_timer: tokio::time::interval(DNS_AUTO_REFRESH_INTERVAL),
             last_auto_dns_servers: Vec::new(),
             resume_monitor: NipartResumeMonitor::new(),
+            boot_applied,
         })
     }
 
@@ -270,8 +290,31 @@ impl NipartDaemon {
                     log::error!("{e}");
                 }
             }
+            NipartManagerCmd::LinkEvents { events, boot } => {
+                let result = self
+                    .commander
+                    .event_manager
+                    .handle_events(events.into_vec(), boot)
+                    .await;
+                if boot {
+                    // Release the boot transaction lock only after the
+                    // initial batch has been applied (or failed).  Report
+                    // the real outcome: the lock must be released either
+                    // way, but a failed batch is not "applied".
+                    match &result {
+                        Ok(()) => log::info!("Boot saved state applied"),
+                        Err(e) => {
+                            log::error!("Failed to apply boot saved state: {e}")
+                        }
+                    }
+                    self.boot_applied.notify_one();
+                } else if let Err(e) = result {
+                    log::error!("{e}");
+                }
+            }
             NipartManagerCmd::GatewayChanged => {
                 self.handle_gateway_changed().await;
+                self.update_daemon_online_state().await;
             }
             NipartManagerCmd::DhcpV4LeaseApplied(iface_name) => {
                 if let Err(e) = self
@@ -284,7 +327,16 @@ impl NipartDaemon {
                          {iface_name} after DHCPv4 lease: {e}"
                     );
                 }
+                self.update_daemon_online_state().await;
             }
+        }
+    }
+
+    /// Re-evaluate the daemon online state after a DHCP notification that
+    /// can install a default route without a link event.
+    async fn update_daemon_online_state(&mut self) {
+        if let Err(e) = self.commander.update_daemon_online_state().await {
+            log::debug!("Failed to update daemon online state: {e}");
         }
     }
 }

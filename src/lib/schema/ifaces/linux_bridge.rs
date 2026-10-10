@@ -193,9 +193,7 @@ impl NipartInterface for LinuxBridgeInterface {
         self.bridge
             .as_ref()
             .and_then(|br_conf| br_conf.ports.as_ref())
-            .map(|ports| {
-                ports.as_slice().iter().map(|p| p.name.as_str()).collect()
-            })
+            .map(|ports| ports.iter().map(|p| p.name.as_str()).collect())
     }
 
     /// * Include port_name if port config defined
@@ -323,7 +321,7 @@ impl LinuxBridgeInterface {
                 return true;
             }
             if let Some(ports) = br_conf.ports.as_ref()
-                && ports.as_slice().iter().any(|port_conf| {
+                && ports.iter().any(|port_conf| {
                     if let Some(vlan_conf) = port_conf.vlan.as_ref() {
                         !vlan_conf.is_empty()
                     } else {

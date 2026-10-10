@@ -282,6 +282,12 @@ impl MergedInterface {
                 "Include interface {} to edit as its controller required so",
                 self.merged.name()
             );
+        } else if self.for_apply.is_none() {
+            // The desired state did not change this interface, but its
+            // controller relation did: the controller just appeared (or its
+            // port list changed) and this port must be attached through a
+            // minimal diff carrying the controller.
+            self.mark_as_changed();
         }
         let Some(apply_iface) = self.for_apply.as_mut() else {
             return Err(NipartError::new(

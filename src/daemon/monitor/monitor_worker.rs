@@ -12,8 +12,9 @@ use futures_channel::{
 };
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use nipart::{
-    ErrorKind, Interface, InterfaceLinkEvent, InterfaceType, NipartError,
-    NipartInterface,
+    ErrorKind, Interface, InterfaceLinkEvent, InterfaceLinkState,
+    InterfaceState, InterfaceType, NipartError, NipartInterface,
+    NipartNoDaemon, NipartQueryOption,
 };
 use rtnetlink::{
     MulticastGroup, new_multicast_connection,
@@ -41,6 +42,24 @@ const DELAY_TICK_SEC_IF_BUSY: u64 = 1;
 // Check delay queue event every day if delay_queue is empty, we cannot use
 // Duration::MAX which will cause overflow on Interval::reset_after()
 const DELAY_TICK_SEC_IF_FREE: u64 = 24 * 60 * 60;
+
+/// Reconciliation interval while the daemon has not reached `online` (boot,
+/// waiting for link/DHCP).  Netlink notifications are the primary source;
+/// this query only bounds the damage of dropped notifications.
+const RECONCILE_INTERVAL_NOT_ONLINE_SECS: u64 = 5;
+/// Reconciliation interval after the daemon is marked online.
+const RECONCILE_INTERVAL_ONLINE_SECS: u64 = 30;
+
+/// Link events collected during one dump, to be sent to the event worker as
+/// a single batch.
+#[derive(Debug)]
+struct CollectBatch {
+    events: Vec<InterfaceLinkEvent>,
+    /// Whether this is the initial daemon-start dump whose apply performs
+    /// boot activation (saved state is `memory_only` and DHCP clients are
+    /// restarted even when the kernel state already matches).
+    boot: bool,
+}
 
 /// Compact last link state kept for pause/resume reconciliation and
 /// duplicate event deduplication.
@@ -142,12 +161,12 @@ pub(crate) enum NipartMonitorCmd {
     EnableWifiMonitor,
     /// Stop monitoring on WIFI SSID association
     DisableWifiMonitor,
-    /// Record wifi-phy kernel names the daemon has already applied (the
-    /// boot pass hands every applied phy to the wifi plugin). A later
-    /// link event of such a phy must not be announced as a new phy, or
-    /// the event worker would re-apply the saved wifi config and disturb
-    /// the plugin's in-flight connection attempt.
-    MarkWifiPhysKnown(Vec<String>),
+    /// Begin monitoring: open the netlink session and emit the current link
+    /// state as one event batch.  Before this command the worker only
+    /// registers watches and must not open a netlink session, so no event
+    /// can reach the event worker before the daemon explicitly starts it.
+    /// Idempotent.
+    Start,
     /// Stop the monitoring but preserving the internal monitoring list.
     /// Nested pauses require the same number of resumes before monitoring
     /// restarts.
@@ -167,6 +186,12 @@ pub(crate) enum NipartMonitorCmd {
     /// carries no SSID to compare against the pre-pause snapshot: the
     /// event worker resolves the SSID from the current state itself.
     ForgetPausedState(Vec<String>),
+    /// Forget the last emitted link state and the known-wifi-phy mark of the
+    /// given interfaces, so the next reconciliation pass emits their event
+    /// again (a wifi-phy is announced as new again and the saved WIFI
+    /// profiles are handed to the plugin again).  Used to retry an apply
+    /// which failed after the interfaces were already recorded as emitted.
+    ForgetEmitted(Vec<String>),
 }
 
 impl std::fmt::Display for NipartMonitorCmd {
@@ -193,8 +218,8 @@ impl std::fmt::Display for NipartMonitorCmd {
             Self::DisableWifiMonitor => {
                 write!(f, "disable-wifi-monitor")
             }
-            Self::MarkWifiPhysKnown(ifaces) => {
-                write!(f, "mark-wifi-phys-known:{ifaces:?}")
+            Self::Start => {
+                write!(f, "start-monitor")
             }
             Self::Pause => {
                 write!(f, "pause-monitor")
@@ -210,6 +235,9 @@ impl std::fmt::Display for NipartMonitorCmd {
             }
             Self::ForgetPausedState(ifaces) => {
                 write!(f, "forget-paused-state:{ifaces:?}")
+            }
+            Self::ForgetEmitted(ifaces) => {
+                write!(f, "forget-emitted:{ifaces:?}")
             }
         }
     }
@@ -265,6 +293,15 @@ pub(crate) struct NipartMonitorWorker {
     /// reappearance is announced again.
     wifi_phys_emited: HashSet<String>,
     delay_queue: HashMap<String, (InterfaceLinkEvent, Instant)>,
+    /// Whether the daemon has issued [`NipartMonitorCmd::Start`].  Watches
+    /// may be registered before, but no netlink session is opened (and no
+    /// event emitted) until then.
+    started: bool,
+    /// Set while a dump is being collected into one batch instead of
+    /// emitting each event individually.
+    collect_batch: Option<CollectBatch>,
+    /// When the next periodic reconciliation query is due.
+    next_reconcile: Instant,
 }
 
 impl TaskWorker for NipartMonitorWorker {
@@ -289,6 +326,9 @@ impl TaskWorker for NipartMonitorWorker {
             paused_state: None,
             wifi_phys_emited: HashSet::new(),
             delay_queue: HashMap::new(),
+            started: false,
+            collect_batch: None,
+            next_reconcile: Instant::now(),
         })
     }
 
@@ -341,9 +381,20 @@ impl TaskWorker for NipartMonitorWorker {
                     self.pause();
                 }
             }
-            NipartMonitorCmd::MarkWifiPhysKnown(ifaces) => {
-                for iface in ifaces {
-                    self.wifi_phys_emited.insert(iface);
+            NipartMonitorCmd::Start => {
+                if !self.started {
+                    self.started = true;
+                    if self.should_resume() {
+                        self.start_and_dump().await?;
+                    } else {
+                        self.send_batch(CollectBatch {
+                            events: Vec::new(),
+                            boot: true,
+                        })
+                        .await?;
+                    }
+                    self.next_reconcile =
+                        Instant::now() + Self::reconcile_interval();
                 }
             }
             NipartMonitorCmd::Pause => {
@@ -386,6 +437,17 @@ impl TaskWorker for NipartMonitorWorker {
                     self.emited.remove(iface);
                 }
             }
+            NipartMonitorCmd::ForgetEmitted(ifaces) => {
+                if let Some(paused_state) = self.paused_state.as_mut() {
+                    for iface in &ifaces {
+                        paused_state.remove(iface);
+                    }
+                }
+                for iface in &ifaces {
+                    self.emited.remove(iface);
+                    self.wifi_phys_emited.remove(iface);
+                }
+            }
         }
         Ok(NipartMonitorReply::None)
     }
@@ -396,11 +458,26 @@ impl TaskWorker for NipartMonitorWorker {
         // First tick happen immediately
         ticker.tick().await;
         loop {
-            if self.delay_queue.is_empty() {
-                ticker.reset_after(Duration::from_secs(DELAY_TICK_SEC_IF_FREE));
+            let mut reset = if self.delay_queue.is_empty() {
+                Duration::from_secs(DELAY_TICK_SEC_IF_FREE)
             } else {
-                ticker.reset_after(Duration::from_secs(DELAY_TICK_SEC_IF_BUSY));
+                Duration::from_secs(DELAY_TICK_SEC_IF_BUSY)
+            };
+            // Wake up at the reconciliation deadline too.  The netlink
+            // session is only active while running (not paused), so the
+            // periodic query only applies then.
+            if self.started
+                && self.manual_pause_count == 0
+                && self.netlink_handle.is_some()
+            {
+                let until = self
+                    .next_reconcile
+                    .saturating_duration_since(Instant::now());
+                if until < reset {
+                    reset = until;
+                }
             }
+            ticker.reset_after(reset.max(Duration::from_millis(1)));
             if let Some(mut netlink_msg_receiver) =
                 self.netlink_msg_receiver.take()
             {
@@ -429,6 +506,13 @@ impl TaskWorker for NipartMonitorWorker {
                     _ = ticker.tick() => {
                         if let Err(e) = self.process_delay_queue().await {
                             log::error!("{e}");
+                        }
+                        if Instant::now() >= self.next_reconcile {
+                            if let Err(e) = self.reconcile().await {
+                                log::error!("{e}");
+                            }
+                            self.next_reconcile =
+                                Instant::now() + Self::reconcile_interval();
                         }
                     }
                 }
@@ -472,7 +556,9 @@ impl NipartMonitorWorker {
     /// "socket is active" check from `process_cmd()`. The handle remains
     /// set for the whole active period.
     fn should_start_netlink(&self) -> bool {
-        self.manual_pause_count == 0 && self.netlink_handle.is_none()
+        self.started
+            && self.manual_pause_count == 0
+            && self.netlink_handle.is_none()
     }
 
     /// Whether the resume link dump must emit `event`.
@@ -507,6 +593,23 @@ impl NipartMonitorWorker {
         &mut self,
         event: InterfaceLinkEvent,
     ) -> Result<(), NipartError> {
+        // The initial boot dump may run before udev finished renaming the
+        // NIC.  Do not announce it yet (and do not record it as emitted):
+        // the udev rename/newlink event or the periodic reconciliation
+        // emits it once the udev database entry exists, so the saved config
+        // cannot race the udev rename.
+        let is_boot =
+            self.collect_batch.as_ref().is_some_and(|batch| batch.boot);
+        if is_boot
+            && !event.is_delete
+            && !crate::udev::udev_net_device_is_initialized(event.iface_index)
+        {
+            log::debug!(
+                "{}: udev not initialized yet, deferring boot event",
+                event.iface_name
+            );
+            return Ok(());
+        }
         if !self.emit_on_resume(&event) {
             log::trace!(
                 "{}: link state is unchanged since monitor pause, no event \
@@ -570,7 +673,13 @@ impl NipartMonitorWorker {
         // distinguish a real down->up transition from a duplicate up event.
         // Without this, every managed interface would be re-applied and its
         // DHCP client restarted after each unrelated `npt up`.
-        self.delay_queue.clear();
+        //
+        // The delay queue is kept too: a down event debounced just before an
+        // apply's pause would otherwise be lost (the resume link dump sees
+        // its state already recorded as down and emits nothing), and the
+        // event that keeps the desired state from being re-applied would
+        // never fire.  A resume event for the same interface replaces or
+        // removes the queued entry.
         self.iface_mac.clear();
     }
 
@@ -593,38 +702,190 @@ impl NipartMonitorWorker {
             );
         }
         log::trace!("NipartMonitorWorker sending out {event:?}");
-        if let Some(sender) = self.msg_to_commander.as_mut() {
-            let cmd = NipartManagerCmd::LinkEvent(Box::new(event.clone()));
-            sender.send(cmd).await.map_err(|e| {
-                NipartError::new(
-                    ErrorKind::Bug,
-                    format!(
-                        "NipartMonitorWorker: Failed to send to commander: {e}"
-                    ),
-                )
-            })?;
-            // Remove event on delay_queue also
-            self.delay_queue.remove(&event.iface_name);
-            if event.is_delete {
-                self.emited.remove(&event.iface_name);
-                self.wifi_phys_emited.remove(&event.iface_name);
-            } else {
-                if event.is_new_wifi_phy {
-                    self.wifi_phys_emited.insert(event.iface_name.to_string());
-                }
-                let last_event = self.last_link_event(&event);
-                self.emited.insert(event.iface_name.to_string(), last_event);
-            }
-            Ok(())
+        // Remove event on delay_queue also
+        self.delay_queue.remove(&event.iface_name);
+        if event.is_delete {
+            self.emited.remove(&event.iface_name);
+            self.wifi_phys_emited.remove(&event.iface_name);
         } else {
-            Err(NipartError::new(
+            if event.is_new_wifi_phy {
+                self.wifi_phys_emited.insert(event.iface_name.to_string());
+            }
+            let last_event = self.last_link_event(&event);
+            self.emited.insert(event.iface_name.to_string(), last_event);
+        }
+        if let Some(batch) = self.collect_batch.as_mut() {
+            batch.events.push(event);
+            return Ok(());
+        }
+        let Some(sender) = self.msg_to_commander.as_mut() else {
+            return Err(NipartError::new(
                 ErrorKind::Bug,
                 format!(
                     "Got NipartMonitorWorker without msg_to_commander: \
                      {self:?}"
                 ),
-            ))
+            ));
+        };
+        let cmd = NipartManagerCmd::LinkEvent(Box::new(event));
+        sender.send(cmd).await.map_err(|e| {
+            NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "NipartMonitorWorker: Failed to send to commander: {e}"
+                ),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Start the monitor and emit the current link state as one batch.
+    ///
+    /// The batch is always sent, even when empty, so the daemon's boot
+    /// hand-off can release its transaction lock.
+    async fn start_and_dump(&mut self) -> Result<(), NipartError> {
+        self.collect_batch = Some(CollectBatch {
+            events: Vec::new(),
+            boot: true,
+        });
+        let result = self.resume().await;
+        let batch = self.collect_batch.take();
+        // Always send the batch: the daemon's boot hand-off releases its
+        // transaction lock when it arrives, even if the dump failed.
+        if let Some(batch) = batch {
+            self.send_batch(batch).await?;
         }
+        result
+    }
+
+    async fn send_batch(
+        &mut self,
+        batch: CollectBatch,
+    ) -> Result<(), NipartError> {
+        let Some(sender) = self.msg_to_commander.as_mut() else {
+            return Err(NipartError::new(
+                ErrorKind::Bug,
+                "Got NipartMonitorWorker without msg_to_commander".to_string(),
+            ));
+        };
+        let cmd = NipartManagerCmd::LinkEvents {
+            events: batch.events.into_boxed_slice(),
+            boot: batch.boot,
+        };
+        sender.send(cmd).await.map_err(|e| {
+            NipartError::new(
+                ErrorKind::Bug,
+                format!(
+                    "NipartMonitorWorker: Failed to send event batch to \
+                     commander: {e}"
+                ),
+            )
+        })?;
+        Ok(())
+    }
+
+    fn reconcile_interval() -> Duration {
+        if crate::daemon::DAEMON_IS_ONLINE.initialized() {
+            Duration::from_secs(RECONCILE_INTERVAL_ONLINE_SECS)
+        } else {
+            Duration::from_secs(RECONCILE_INTERVAL_NOT_ONLINE_SECS)
+        }
+    }
+
+    /// Reconcile the tracked link state with a full kernel network state
+    /// query.
+    ///
+    /// Netlink multicast messages can be dropped when the kernel socket
+    /// buffer overflows; this periodic query recovers the final state.  It
+    /// uses the full nispor query (not the RTM_GETLINK dump) so a missed
+    /// wifi association is recovered together with its SSID.
+    async fn reconcile(&mut self) -> Result<(), NipartError> {
+        if !self.started
+            || self.manual_pause_count > 0
+            || self.netlink_handle.is_none()
+        {
+            return Ok(());
+        }
+        let cur_state =
+            NipartNoDaemon::query_network_state(NipartQueryOption::running())
+                .await?;
+        let mut seen: HashSet<String> = HashSet::new();
+        self.collect_batch = Some(CollectBatch {
+            events: Vec::new(),
+            boot: false,
+        });
+        let result: Result<(), NipartError> = async {
+            for (name, iface) in cur_state.ifaces.kernel_ifaces.iter() {
+                if let Some(mac) = iface.base_iface().mac_address.as_deref() {
+                    self.iface_mac
+                        .insert(name.clone(), mac.to_ascii_uppercase());
+                }
+                let Some(event) = link_event_from_iface(
+                    name,
+                    iface,
+                    self.wifi_monitor_enabled,
+                ) else {
+                    continue;
+                };
+                // Record presence before the interest filter: a present but
+                // untracked interface must not be reported as disappeared.
+                seen.insert(name.clone());
+                if !self.event_is_interested(&event) {
+                    continue;
+                }
+                // Skip until udev initialized the NIC so the recovered event
+                // cannot race a udev rename either.
+                if !crate::udev::udev_net_device_is_initialized(
+                    iface.base_iface().iface_index.unwrap_or(0),
+                ) {
+                    continue;
+                }
+                if let Some(previous) = self.emited.get(name.as_str())
+                    && previous.is_same_state(&event)
+                {
+                    continue;
+                }
+                // Go through the normal debounce path: a flapping interface
+                // must not be applied again on every reconcile.
+                self.try_notify(event).await?;
+            }
+
+            // Interfaces tracked by the monitor but missing from the query
+            // disappeared: emit delete events so the event worker re-arms
+            // their saved config watches.
+            let tracked: Vec<String> = self.emited.keys().cloned().collect();
+            for name in tracked {
+                if seen.contains(&name) {
+                    continue;
+                }
+                if let Some(last) = self.emited.get(name.as_str()).cloned() {
+                    // The query no longer carries this interface's MAC, so
+                    // restore it to let the delete event match a MAC watch.
+                    if let Some(mac) = last.mac_address.clone() {
+                        self.iface_mac.insert(name.clone(), mac);
+                    }
+                    let event = last.to_delete_event(&name);
+                    if self.event_is_interested(&event) {
+                        self.try_notify(event).await?;
+                    } else {
+                        // No watch interests this interface anymore: drop
+                        // the stale record instead of retrying an
+                        // uninterested delete event on every pass.
+                        self.emited.remove(&name);
+                        self.wifi_phys_emited.remove(&name);
+                    }
+                    self.iface_mac.remove(&name);
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let batch = self.collect_batch.take();
+        result?;
+        if let Some(batch) = batch {
+            self.send_batch(batch).await?;
+        }
+        Ok(())
     }
 
     async fn process_delay_queue(&mut self) -> Result<(), NipartError> {
@@ -967,6 +1228,43 @@ fn parse_link_msg(
     }
 
     Some((event, mac))
+}
+
+/// Build a link event from a queried kernel interface (reconciliation).
+///
+/// `is_up` follows the netlink monitor's carrier signal: `link-state: up`
+/// and `link-state: dormant` (carrier up while waiting for a supplicant,
+/// e.g. 802.1X) are up; a carrier-less virtual link (`link-state: unknown`)
+/// is up when administratively up.  For a wifi-phy the association SSID is
+/// included so a missed association is recovered by the periodic query.
+fn link_event_from_iface(
+    iface_name: &str,
+    iface: &Interface,
+    wifi_monitor_enabled: bool,
+) -> Option<InterfaceLinkEvent> {
+    let base = iface.base_iface();
+    let is_up = match base.link_state {
+        Some(InterfaceLinkState::Up) | Some(InterfaceLinkState::Dormant) => {
+            true
+        }
+        Some(InterfaceLinkState::Unknown) => base.state == InterfaceState::Up,
+        _ => false,
+    };
+    let mut event = InterfaceLinkEvent::new(
+        iface_name.to_string(),
+        base.iface_index.unwrap_or(0),
+        iface.iface_type().clone(),
+        is_up,
+        None,
+    );
+    if wifi_monitor_enabled
+        && iface.iface_type() == &InterfaceType::WifiPhy
+        && let Interface::WifiPhy(wifi_iface) = iface
+        && let Some(ssid) = wifi_iface.ssid()
+    {
+        event.ssid = Some(ssid.to_string());
+    }
+    Some(event)
 }
 
 /// Format a raw MAC address (6 bytes) into the uppercase

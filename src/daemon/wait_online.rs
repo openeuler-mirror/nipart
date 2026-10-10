@@ -14,6 +14,22 @@ use super::{commander::NipartCommander, daemon::DAEMON_IS_ONLINE};
 const MAX_RETRY_WAIT: u64 = 2;
 
 impl NipartCommander {
+    /// Shared daemon online-state update.
+    ///
+    /// Every daemon path that can change the network online state
+    /// (`npt apply`, `npt up/down`, `npt wifi on/off`, ...) or that notices
+    /// it (the event worker after an apply, DHCP lease/gateway
+    /// notifications, the monitor reconcile pass) must call this.  It is a
+    /// one-shot latch: once online, later calls are no-ops.
+    pub(crate) async fn update_daemon_online_state(
+        &mut self,
+    ) -> Result<(), NipartError> {
+        if DAEMON_IS_ONLINE.initialized() {
+            return Ok(());
+        }
+        self.try_set_daemon_online(None, None).await
+    }
+
     pub(crate) async fn try_set_daemon_online(
         &mut self,
         saved_state: Option<&NetworkState>,

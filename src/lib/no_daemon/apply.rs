@@ -12,9 +12,64 @@ use crate::{
 const RETRY_COUNT_COMMON: usize = 10;
 const RETRY_COUNT_WIFI: usize = 20;
 const RETRY_INTERVAL_MS: u64 = 500;
+// Top-level apply retry (no-daemon mode): mirror the daemon retry so a
+// transient failure of the apply itself (e.g. a NIC not ready yet) is
+// retried once after this interval before the error is reported.
+const TOP_LEVEL_RETRY_MAX: u32 = 2;
+const TOP_LEVEL_RETRY_INTERVAL_SEC: u64 = 2;
 
 impl NipartNoDaemon {
+    /// Apply the desired state in no-daemon mode.
+    ///
+    /// The whole apply retries once after [TOP_LEVEL_RETRY_INTERVAL_SEC] when
+    /// it fails with a retriable error; non-retriable errors
+    /// (`ErrorKind::retriable()`) are reported immediately.
     pub async fn apply_network_state(
+        desired_state: NetworkState,
+        option: NipartApplyOption,
+    ) -> Result<NetworkState, NipartError> {
+        let mut last_err: Option<NipartError> = None;
+        for attempt in 1..=TOP_LEVEL_RETRY_MAX {
+            match Self::apply_network_state_once(
+                desired_state.clone(),
+                option.clone(),
+            )
+            .await
+            {
+                Ok(state) => return Ok(state),
+                Err(e) => {
+                    if !e.kind().retriable() {
+                        return Err(e);
+                    }
+                    if attempt < TOP_LEVEL_RETRY_MAX {
+                        log::warn!(
+                            "Apply failed (attempt \
+                             {attempt}/{TOP_LEVEL_RETRY_MAX}), retrying in \
+                             {TOP_LEVEL_RETRY_INTERVAL_SEC} seconds: {e}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            TOP_LEVEL_RETRY_INTERVAL_SEC,
+                        ))
+                        .await;
+                    } else {
+                        log::warn!(
+                            "Apply failed (attempt \
+                             {attempt}/{TOP_LEVEL_RETRY_MAX}): {e}"
+                        );
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            NipartError::new(
+                ErrorKind::Bug,
+                "BUG: apply retry loop finished without an error".to_string(),
+            )
+        }))
+    }
+
+    async fn apply_network_state_once(
         desired_state: NetworkState,
         option: NipartApplyOption,
     ) -> Result<NetworkState, NipartError> {

@@ -143,7 +143,6 @@ impl From<&nispor::BondInfo> for BondConfig {
             ports: Some(
                 np_bond
                     .ports
-                    .as_slice()
                     .iter()
                     .map(|kernel_iface_name| BondPortConfig {
                         name: kernel_iface_name.to_string(),

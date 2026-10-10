@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use nipart::{BaseInterface, InterfaceType, NetworkState, NipartInterface};
+use nipart::{InterfaceType, NetworkState, NipartInterface};
 
 use super::{
-    base_iface_for_dhcp_restore, gen_saved_route_reconcile_state,
-    gen_wifi_off_purge_state, remove_manual_activation, remove_ready_state,
+    gen_non_nic_state, gen_saved_route_reconcile_state,
+    gen_wifi_off_purge_state, remove_manual_activation,
 };
 
 #[test]
@@ -112,186 +112,107 @@ fn test_gen_saved_route_reconcile_state_matches_mac_identified_profile() {
 }
 
 #[test]
-fn test_base_iface_for_dhcp_restore_inherits_config_only_ipv4() {
-    let kernel_base: BaseInterface = rmsd_yaml::from_str(
+fn test_gen_non_nic_state_keeps_virtual_and_global_only() {
+    let state: NetworkState = rmsd_yaml::from_str(
         r#"---
-            name: eth0
-            type: ethernet
-            state: up
-            ipv4:
-              enabled: true
-              dhcp: true
-            "#,
-    )
-    .unwrap();
-    let saved_base: BaseInterface = rmsd_yaml::from_str(
-        r#"---
-            name: eth0
-            type: ethernet
-            state: up
-            ipv4:
-              enabled: true
-              dhcp: true
-              auto-gateway: false
-              auto-route-metric: 321
-            "#,
-    )
-    .unwrap();
-
-    let ret = base_iface_for_dhcp_restore(&kernel_base, &saved_base);
-    assert_eq!(ret.ipv4.as_ref().and_then(|i| i.auto_gateway), Some(false));
-    assert_eq!(
-        ret.ipv4.as_ref().and_then(|i| i.auto_route_metric),
-        Some(321)
-    );
-}
-
-#[test]
-fn test_base_iface_for_dhcp_restore_defaults_to_none() {
-    // Without `auto-gateway` in the saved config, the restored client
-    // keeps the default behavior (gateway routes added).
-    let kernel_base: BaseInterface = rmsd_yaml::from_str(
-        r#"---
-            name: eth0
-            type: ethernet
-            state: up
-            ipv4:
-              enabled: true
-              dhcp: true
-            "#,
-    )
-    .unwrap();
-    // The saved config carries no IPv4 section at all.
-    let saved_base: BaseInterface = rmsd_yaml::from_str(
-        r#"---
-            name: eth0
-            type: ethernet
-            state: up
-            "#,
-    )
-    .unwrap();
-
-    let ret = base_iface_for_dhcp_restore(&kernel_base, &saved_base);
-    assert_eq!(ret.ipv4.as_ref().and_then(|i| i.auto_gateway), None);
-    assert_eq!(ret.ipv4.as_ref().and_then(|i| i.auto_route_metric), None);
-}
-
-#[test]
-fn test_remove_ready_state_moves_userspace_wifi_cfg() {
-    // A `wifi-cfg` profile is a userspace interface: it must be moved
-    // into the ready state so the boot retry loop can terminate, even
-    // when no kernel NIC is ready yet.
-    let mut state: NetworkState = rmsd_yaml::from_str(
-        r#"---
-            interfaces:
-              - name: MyWiFi
-                type: wifi-cfg
-                state: up
-                wifi:
-                  ssid: MyWiFi
-            "#,
-    )
-    .unwrap();
-
-    let ready = remove_ready_state(&mut state, &[]);
-
-    let wifi_cfgs: Vec<_> = ready
-        .ifaces
-        .iter()
-        .filter(|i| i.iface_type() == &InterfaceType::WifiCfg)
-        .collect();
-    assert_eq!(wifi_cfgs.len(), 1);
-    assert_eq!(wifi_cfgs[0].name(), "MyWiFi");
-    assert!(state.ifaces.is_empty());
-}
-
-#[test]
-fn test_remove_ready_state_keeps_unready_kernel_iface() {
-    // The non-virtual kernel interface without udev initialization must
-    // stay in the saved state for later retry, while the userspace
-    // `wifi-cfg` is moved out immediately.
-    let mut state: NetworkState = rmsd_yaml::from_str(
-        r#"---
-            interfaces:
-              - name: eth0
-                type: ethernet
-                state: up
-              - name: MyWiFi
-                type: wifi-cfg
-                state: up
-                wifi:
-                  ssid: MyWiFi
-            "#,
-    )
-    .unwrap();
-
-    let ready = remove_ready_state(&mut state, &[]);
-
-    assert_eq!(
-        ready
-            .ifaces
-            .iter()
-            .filter(|i| i.iface_type() == &InterfaceType::WifiCfg)
-            .count(),
-        1
-    );
-    // eth0 is not ready yet, it should still be pending in saved state.
-    assert!(state.ifaces.kernel_ifaces.contains_key("eth0"));
-    assert!(state.ifaces.user_ifaces.is_empty());
-}
-
-#[test]
-fn test_remove_ready_state_moves_global_route_rules_and_defers_iif() {
-    let mut state: NetworkState = rmsd_yaml::from_str(
-        r#"---
-            interfaces:
-              - name: eth0
-                type: ethernet
-                state: up
+            routes:
+              config:
+                - destination: 203.0.113.0/24
+                  next-hop-interface: eth0
+                  next-hop-address: 192.0.2.1
+                  metric: 103
+                - destination: 198.51.100.0/24
+                  next-hop-interface: bond0
+                  next-hop-address: 192.0.2.1
+                  metric: 104
+                - destination: 192.0.2.0/24
+                  metric: 105
+                - destination: 198.18.0.0/24
+                  next-hop-interface: vlan0
+                  next-hop-address: 192.0.2.1
+                  metric: 106
             route-rules:
               config:
+                - ip-from: 203.0.113.0/24
+                  route-table: 500
                 - ip-from: 198.51.100.0/24
                   route-table: 500
-                - ip-from: 203.0.113.0/24
-                  route-table: 500
                   iif: eth0
+                - ip-from: 192.0.2.0/24
+                  route-table: 500
+                  iif: bond0
+                - ip-from: 198.18.0.0/24
+                  route-table: 500
+                  iif: vlan0
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+              - name: bond0
+                type: bond
+                state: up
+                bond:
+                  mode: balance-rr
+                  ports:
+                    - name: eth0
+              - name: vlan0
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: bond0
+                  id: 100
             "#,
     )
     .unwrap();
 
-    let ready = remove_ready_state(&mut state, &[]);
+    // Without the eth0 port present, neither bond0 nor the VLAN built on top
+    // of it can be created: only the global route and rule are applied now.
+    let empty_cur_state = NetworkState::default();
+    let non_nic = gen_non_nic_state(&state, &empty_cur_state);
+    // All virtual interfaces are still in the creation state; only the
+    // virtual routes/rules which cannot be installed are deferred.
+    assert_eq!(non_nic.ifaces.iter().count(), 2);
+    let routes = non_nic.routes.config.as_ref().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].destination.as_deref(), Some("192.0.2.0/24"));
+    let rules = non_nic.route_rules.config.as_ref().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert!(
+        rules[0].iif.is_none()
+            && rules[0].ip_from.as_deref() == Some("203.0.113.0/24")
+    );
 
-    let ready_rules = ready.route_rules.config.unwrap();
-    assert_eq!(ready_rules.len(), 1);
-    assert!(ready_rules[0].iif.is_none());
-    let pending_rules = state.route_rules.config.unwrap();
-    assert_eq!(pending_rules.len(), 1);
-    assert_eq!(pending_rules[0].iif.as_deref(), Some("eth0"));
-}
-
-#[test]
-fn test_remove_ready_state_moves_route_rule_when_iif_ready() {
-    let mut state: NetworkState = rmsd_yaml::from_str(
+    // With eth0 present, bond0 is creatable and the VLAN built on top of it
+    // becomes creatable through the dependency chain: their routes and rules
+    // are applied by this transaction.
+    let cur_state: NetworkState = rmsd_yaml::from_str(
         r#"---
             interfaces:
               - name: eth0
                 type: ethernet
                 state: up
-            route-rules:
-              config:
-                - ip-from: 203.0.113.0/24
-                  route-table: 500
-                  iif: eth0
             "#,
     )
     .unwrap();
-
-    let ready = remove_ready_state(&mut state, &["eth0".to_string()]);
-
-    let ready_rules = ready.route_rules.config.unwrap();
-    assert_eq!(ready_rules.len(), 1);
-    assert_eq!(ready_rules[0].iif.as_deref(), Some("eth0"));
-    assert!(state.route_rules.config.unwrap().is_empty());
+    let non_nic = gen_non_nic_state(&state, &cur_state);
+    let routes = non_nic.routes.config.as_ref().unwrap();
+    let destinations: Vec<&str> = routes
+        .iter()
+        .filter_map(|r| r.destination.as_deref())
+        .collect();
+    assert_eq!(destinations.len(), 3);
+    assert!(destinations.contains(&"198.51.100.0/24"));
+    assert!(destinations.contains(&"192.0.2.0/24"));
+    assert!(destinations.contains(&"198.18.0.0/24"));
+    let rules = non_nic.route_rules.config.as_ref().unwrap();
+    let iifs: Vec<Option<&str>> =
+        rules.iter().map(|r| r.iif.as_deref()).collect();
+    // The eth0 rule is deferred to the event path; the global, bond0 and
+    // vlan0 rules are applied here.
+    assert!(!iifs.contains(&Some("eth0")));
+    assert!(iifs.contains(&Some("bond0")));
+    assert!(iifs.contains(&Some("vlan0")));
+    assert!(iifs.contains(&None));
 }
 
 #[test]

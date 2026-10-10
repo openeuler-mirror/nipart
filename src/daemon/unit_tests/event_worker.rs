@@ -9,10 +9,11 @@ use nipart::{
 };
 
 use super::{
-    gen_desired_iface_down, gen_routes_for_iface_up,
-    gen_routes_for_wifi_cfg_up, gen_wifi_plugin_state,
-    handle_event_auto_connect, handle_wifi_phy_event, is_route_matching_iface,
-    is_stale_link_down_event, nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
+    gen_desired_iface_down, gen_missing_virtual_dependents,
+    gen_routes_for_iface_up, gen_routes_for_wifi_cfg_up,
+    gen_wifi_plugin_state_for_phy, handle_event_auto_connect,
+    handle_wifi_phy_event, is_route_matching_iface, is_stale_link_down_event,
+    nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
 };
 
 fn gen_wifi_cfg_iface() -> Interface {
@@ -204,33 +205,68 @@ fn test_is_route_matching_iface() {
 }
 
 #[test]
-fn test_gen_wifi_plugin_state_filters_non_wifi_ifaces() {
+fn test_gen_wifi_plugin_state_matches_phy_only() {
     let state: NetworkState = rmsd_yaml::from_str(
         r#"---
             interfaces:
               - name: eth0
                 type: ethernet
                 state: up
+              - name: wlan0
+                type: wifi-phy
+                state: up
               - name: Test-WIFI
                 type: wifi-cfg
                 state: up
                 wifi:
                   ssid: Test-WIFI
-              - name: wlan0
-                type: wifi-phy
+                  base-iface: wlan0
+              - name: Other-WIFI
+                type: wifi-cfg
                 state: up
+                wifi:
+                  ssid: Other-WIFI
+                  base-iface: wlan1
+              - name: Any-WIFI
+                type: wifi-cfg
+                state: up
+                wifi:
+                  ssid: Any-WIFI
             "#,
     )
     .unwrap();
 
-    let wifi_state = gen_wifi_plugin_state(&state);
-    assert_eq!(wifi_state.ifaces.iter().count(), 2);
-    assert!(wifi_state.ifaces.iter().all(|iface| {
-        matches!(
-            iface.iface_type(),
-            InterfaceType::WifiCfg | InterfaceType::WifiPhy
-        )
-    }));
+    let wifi_state = gen_wifi_plugin_state_for_phy("wlan0", &state);
+    // eth0, the wifi-phy for wlan1 and the profile bound to wlan1 are out;
+    // the bound and the unbound profiles are in.
+    assert_eq!(wifi_state.ifaces.iter().count(), 3);
+    let names: Vec<&str> = wifi_state.ifaces.iter().map(|i| i.name()).collect();
+    assert!(names.contains(&"wlan0"));
+    assert!(names.contains(&"Test-WIFI"));
+    assert!(names.contains(&"Any-WIFI"));
+}
+
+#[test]
+fn test_gen_wifi_plugin_state_skips_phy_without_config() {
+    let state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: wlan0
+                type: wifi-phy
+                state: up
+              - name: Manual-WIFI
+                type: wifi-cfg
+                state: up
+                auto-connect: false
+                wifi:
+                  ssid: Manual-WIFI
+            "#,
+    )
+    .unwrap();
+
+    // A wifi-phy without any matching SSID profile is not a wifi config:
+    // the plugin must not be contacted for it.
+    assert!(gen_wifi_plugin_state_for_phy("wlan0", &state).is_empty());
 }
 
 fn gen_link_event(iface_name: &str, is_up: bool) -> InterfaceLinkEvent {
@@ -275,6 +311,23 @@ fn test_link_down_event_processed_when_current_down() {
         Some(nipart::InterfaceLinkState::Down);
 
     assert!(!is_stale_link_down_event(
+        &gen_link_event("eth0", false),
+        Some(&cur_iface)
+    ));
+}
+
+#[test]
+fn test_stale_link_down_event_skipped_when_current_dormant() {
+    // `dormant` means carrier is up while waiting for a supplicant (e.g.
+    // 802.1X), which the live netlink path reports as up: a leftover down
+    // event must not purge its IP stack.
+    let saved_state = gen_saved_state();
+    let wan0 = find_iface(&saved_state, "wan0");
+    let mut cur_iface = wan0.clone();
+    cur_iface.base_iface_mut().link_state =
+        Some(nipart::InterfaceLinkState::Dormant);
+
+    assert!(is_stale_link_down_event(
         &gen_link_event("eth0", false),
         Some(&cur_iface)
     ));
@@ -506,4 +559,130 @@ fn test_wifi_phy_up_event_with_other_ssid_ignores_wifi_cfg() {
     let event = gen_wifi_phy_event(true, Some("Other-SSID"));
 
     assert!(handle_wifi_phy_event(&event, &saved_iface).is_none());
+}
+
+#[test]
+fn test_gen_missing_virtual_dependents() {
+    let saved_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+              - name: eth1
+                type: ethernet
+                state: up
+              - name: bond0
+                type: bond
+                state: up
+                bond:
+                  mode: balance-rr
+                  ports:
+                    - name: eth0
+              - name: vrf0
+                type: vrf
+                state: up
+                vrf:
+                  route-table-id: "100"
+                  ports:
+                    - eth0
+              - name: vlan0
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: eth0
+                  id: 100
+              - name: vlan1
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: eth1
+                  id: 101
+            "#,
+    )
+    .unwrap();
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+            "#,
+    )
+    .unwrap();
+
+    let event = gen_link_event("eth0", true);
+    let dependents =
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state);
+    let names: Vec<&str> = dependents.iter().map(|i| i.name()).collect();
+    // bond0 and vrf0 have eth0 as port, vlan0 has eth0 as parent.  vlan1
+    // depends on eth1 and is left alone.
+    assert_eq!(names.len(), 3);
+    assert!(names.contains(&"bond0"));
+    assert!(names.contains(&"vrf0"));
+    assert!(names.contains(&"vlan0"));
+    assert!(!names.contains(&"vlan1"));
+
+    // Once the virtual interfaces exist, the event must not recreate them.
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth0
+                type: ethernet
+                state: up
+              - name: bond0
+                type: bond
+                state: up
+              - name: vrf0
+                type: vrf
+                state: up
+              - name: vlan0
+                type: vlan
+                state: up
+            "#,
+    )
+    .unwrap();
+    assert!(
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state)
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_gen_missing_virtual_dependents_matches_logical_parent_name() {
+    // A VLAN whose base-iface is the logical name of a MAC-identified NIC
+    // must be created when that NIC appears under its kernel name.
+    let saved_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: wan
+                type: ethernet
+                state: up
+                identifier: mac-address
+                mac-address: "02:00:00:00:00:07"
+              - name: vlan-wan
+                type: vlan
+                state: up
+                vlan:
+                  base-iface: wan
+                  id: 7
+            "#,
+    )
+    .unwrap();
+    let cur_state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: eth7
+                type: ethernet
+                state: up
+                mac-address: "02:00:00:00:00:07"
+            "#,
+    )
+    .unwrap();
+    let event = gen_link_event("eth7", true);
+
+    let dependents =
+        gen_missing_virtual_dependents(&event, &saved_state, &cur_state);
+    assert_eq!(dependents.len(), 1);
+    assert_eq!(dependents[0].name(), "vlan-wan");
 }

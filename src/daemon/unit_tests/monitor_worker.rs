@@ -15,9 +15,10 @@ use rtnetlink::{
 };
 
 use super::{
-    EVENT_EXPIRE_TIME_SEC, LastLinkEvent, NipartMonitorCmd,
+    CollectBatch, EVENT_EXPIRE_TIME_SEC, LastLinkEvent, NipartMonitorCmd,
     NipartMonitorWorker, event_is_explicitly_down, format_mac,
-    iface_identity_names, should_ignore_wireless_notification,
+    iface_identity_names, link_event_from_iface,
+    should_ignore_wireless_notification,
 };
 use crate::{daemon::NipartManagerCmd, task::TaskWorker};
 
@@ -258,7 +259,10 @@ fn test_pause_keeps_last_state_and_wifi_phys_emited() {
 
     assert!(worker.emited.contains_key("enp1s0"));
     assert!(worker.emited["enp1s0"].is_up);
-    assert!(worker.delay_queue.is_empty());
+    // A down event debounced just before the pause must survive it: the
+    // resume link dump sees the state already recorded as down and emits
+    // nothing, so clearing the queue would lose the debounced event.
+    assert!(worker.delay_queue.contains_key("enp2s0"));
     assert!(worker.iface_mac.is_empty());
     // The last link state and the announced wifi-phys survive pause/resume
     // so a fresh link dump is not treated as a new down->up transition.
@@ -266,24 +270,34 @@ fn test_pause_keeps_last_state_and_wifi_phys_emited() {
 }
 
 #[test]
-fn test_mark_wifi_phys_known_suppresses_new_phy_event() {
-    // The boot pass applies the saved wifi config to every present
-    // wifi-phy and then records the phy as known. The link dump emitted
-    // when the monitor resumes must not announce it as a new phy: the
-    // event worker would re-apply the saved wifi config and reset the
-    // wifi plugin's in-flight connection attempt.
+fn test_start_gates_netlink_session() {
     let mut worker = gen_worker();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    rt.block_on(worker.process_cmd(NipartMonitorCmd::MarkWifiPhysKnown(vec![
-        "wlan0".to_string(),
-    ])))
+    // Registering a watch before `Start` must not open the netlink
+    // session: no event may reach the event worker before the daemon
+    // explicitly starts the monitor.
+    rt.block_on(
+        worker.process_cmd(NipartMonitorCmd::AddIface("enp1s0".to_string())),
+    )
     .unwrap();
-    assert!(worker.wifi_phys_emited.contains("wlan0"));
+    assert!(worker.iface_monitor_list.contains("enp1s0"));
+    assert!(worker.netlink_handle.is_none());
+    assert!(!worker.should_start_netlink());
+}
 
+#[test]
+fn test_initial_dump_collects_one_boot_batch() {
+    let mut worker = gen_worker();
     let (tx, mut rx) = unbounded();
     worker.msg_to_commander = Some(tx);
     worker.wifi_monitor_enabled = true;
+    worker.collect_batch = Some(CollectBatch {
+        events: Vec::new(),
+        boot: true,
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
     let event = InterfaceLinkEvent::new(
         "wlan0".to_string(),
         10,
@@ -292,25 +306,79 @@ fn test_mark_wifi_phys_known_suppresses_new_phy_event() {
         None,
     );
     rt.block_on(worker.notify(event)).unwrap();
-    let NipartManagerCmd::LinkEvent(event) = rx.try_recv().unwrap() else {
-        panic!("Expected a link event");
-    };
-    assert!(!event.is_new_wifi_phy);
+    // Collected into the batch, not emitted individually.
+    assert!(rx.try_recv().is_err());
+    let batch = worker.collect_batch.take().unwrap();
+    assert_eq!(batch.events.len(), 1);
+    assert!(batch.boot);
+    // The initial dump seeds `wifi_phys_emited`, so the boot-applied phy
+    // is announced as new exactly once.
+    assert!(batch.events[0].is_new_wifi_phy);
+    assert!(worker.wifi_phys_emited.contains("wlan0"));
 
-    // A phy the daemon never applied (e.g. hotplug after boot) is still
-    // announced as new so the plugin receives the saved profiles.
-    let hotplug = InterfaceLinkEvent::new(
-        "wlan1".to_string(),
-        11,
-        InterfaceType::WifiPhy,
-        true,
-        None,
-    );
-    rt.block_on(worker.notify(hotplug)).unwrap();
-    let NipartManagerCmd::LinkEvent(event) = rx.try_recv().unwrap() else {
-        panic!("Expected a link event");
+    rt.block_on(worker.send_batch(batch)).unwrap();
+    let NipartManagerCmd::LinkEvents { events, boot } = rx.try_recv().unwrap()
+    else {
+        panic!("Expected a link event batch");
     };
-    assert!(event.is_new_wifi_phy);
+    assert!(boot);
+    assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn test_link_event_from_iface_maps_state_and_ssid() {
+    // A wifi-phy with carrier and an association SSID.
+    let iface: Interface = rmsd_yaml::from_str(
+        r#"---
+            name: wlan0
+            type: wifi-phy
+            state: up
+            link-state: up
+            wifi:
+              ssid: Test-WIFI
+            "#,
+    )
+    .unwrap();
+    let event = link_event_from_iface("wlan0", &iface, true).unwrap();
+    assert!(event.is_up);
+    assert_eq!(event.ssid.as_deref(), Some("Test-WIFI"));
+
+    // A carrier-less virtual link is up when administratively up.
+    let vpn: Interface = rmsd_yaml::from_str(
+        r#"---
+            name: wg0
+            type: wireguard
+            state: up
+            link-state: unknown
+            "#,
+    )
+    .unwrap();
+    assert!(link_event_from_iface("wg0", &vpn, true).unwrap().is_up);
+
+    // A dormant link (carrier up, e.g. waiting for 802.1X) is up, matching
+    // the live netlink `IFF_LOWER_UP` signal.
+    let dormant: Interface = rmsd_yaml::from_str(
+        r#"---
+            name: eth0
+            type: ethernet
+            state: up
+            link-state: dormant
+            "#,
+    )
+    .unwrap();
+    assert!(link_event_from_iface("eth0", &dormant, true).unwrap().is_up);
+
+    // A wifi-phy administratively up but without carrier is down.
+    let down: Interface = rmsd_yaml::from_str(
+        r#"---
+            name: wlan0
+            type: wifi-phy
+            state: up
+            link-state: down
+            "#,
+    )
+    .unwrap();
+    assert!(!link_event_from_iface("wlan0", &down, true).unwrap().is_up);
 }
 
 #[test]
@@ -629,10 +697,9 @@ fn test_pause_keeps_explicit_down_list() {
 
 #[test]
 fn test_pause_resume_nested_requires_matching_resume() {
-    // `load_saved_state()` pauses the monitor for the whole boot pass while
-    // every apply inside it pauses again. A nested resume must not start the
-    // netlink socket (and emit a fresh link dump) before the outer pause is
-    // released.
+    // Applies (including the boot batch) pause the monitor, and pauses can
+    // nest. A nested resume must not start the netlink socket (and emit a
+    // fresh link dump) before the outer pause is released.
     let mut worker = gen_worker();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -689,4 +756,31 @@ fn test_event_is_explicitly_down_matches_iface_and_ssid() {
         &gen_event("enp1s0"),
         &explicitly_down
     ));
+}
+
+#[test]
+fn test_forget_emitted_clears_last_state_and_wifi_phys_known() {
+    let mut worker = gen_worker();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    worker
+        .emited
+        .insert("enp1s0".to_string(), gen_last_state(true));
+    worker.wifi_phys_emited.insert("wlan0".to_string());
+    worker.paused_state = Some(HashMap::from([(
+        "enp1s0".to_string(),
+        gen_last_state(true),
+    )]));
+
+    rt.block_on(worker.process_cmd(NipartMonitorCmd::ForgetEmitted(vec![
+        "enp1s0".to_string(),
+        "wlan0".to_string(),
+    ])))
+    .unwrap();
+
+    // The next reconcile pass re-emits both: the interface is no longer
+    // recorded as emitted and the wifi-phy is announced as new again.
+    assert!(!worker.emited.contains_key("enp1s0"));
+    assert!(!worker.wifi_phys_emited.contains("wlan0"));
+    assert!(!worker.paused_state.as_ref().unwrap().contains_key("enp1s0"));
 }

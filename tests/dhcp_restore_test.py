@@ -128,8 +128,8 @@ def test_dhcp_client_restored_after_daemon_restart():
         # Restart the daemon while the lease is still present in the
         # kernel.  The kernel state reports the address with `dhcp: true`,
         # so the boot apply sees no diff - the userspace DHCP client (it
-        # died with the daemon) must be restored explicitly, otherwise the
-        # lease expires without renewal.
+        # died with the daemon) must be restarted by the boot batch
+        # (`restart-auto-ip`), otherwise the lease expires without renewal.
         log_pos = 0
         if os.path.exists(DAEMON_LOG):
             log_pos = os.path.getsize(DAEMON_LOG)
@@ -140,8 +140,8 @@ def test_dhcp_client_restored_after_daemon_restart():
             DEFAULT_TIMEOUT,
             _log_since,
             log_pos,
-            f"Restoring DHCPv4 client on interface {DHCP_CLI_NIC}",
-        ), "DHCPv4 client not restored after daemon restart"
+            f"DHCPv4 on interface {DHCP_CLI_NIC}",
+        ), "DHCPv4 client not restarted after daemon restart"
         assert retry_till_true_or_timeout(
             DEFAULT_TIMEOUT, _log_since, log_pos, "got lease 192.0.2"
         ), "DHCPv4 client did not re-acquire the lease after daemon restart"
@@ -179,10 +179,10 @@ def test_dhcp_auto_gateway_false_after_daemon_restart():
         # The kernel state carries the DHCP address with `dhcp: true` but
         # never the config-only `auto_gateway` property.  Whatever path
         # restarts the DHCP client after the daemon restart (the boot apply
-        # sees a diff because of `auto-gateway`, or the client is restored
-        # explicitly when the state matches), the client must keep honoring
-        # `auto-gateway: false`, otherwise the gateway route would be added
-        # on the first renewal.
+        # sees a diff because of `auto-gateway`, or the boot batch
+        # `restart-auto-ip` restarts it when the state matches), the client
+        # must keep honoring `auto-gateway: false`, otherwise the gateway
+        # route would be added on the first renewal.
         log_pos = 0
         if os.path.exists(DAEMON_LOG):
             log_pos = os.path.getsize(DAEMON_LOG)
