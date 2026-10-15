@@ -38,7 +38,9 @@ pub enum InterfaceState {
     Absent,
     /// Interface is not managed by backend. For apply action, interface marked
     /// as ignore will not be changed and will not cause verification failure
-    /// neither.
+    /// neither. Daemon mode persists the entry in the saved state so later
+    /// applies, link events and WIFI profile binding keep it untouched until
+    /// a later apply requests another state (`up`/`down`/`absent`).
     /// When desired controller listed currently ignored interfaces as its
     /// port, nipart will automatically convert these ignored interfaces from
     /// 'state: ignore' to 'state: up' only when:

@@ -57,6 +57,9 @@ impl MergedInterface {
         let saved_only = desired
             .as_ref()
             .is_some_and(|d| d.base_iface().state.is_saved());
+        let ignored = desired
+            .as_ref()
+            .is_some_and(|d| d.base_iface().state.is_ignore());
         let for_save = if let Some(desired) = desired.as_ref() {
             if let Some(saved) = saved {
                 Some(saved.merge(desired)?)
@@ -111,7 +114,26 @@ impl MergedInterface {
             will_delete: false,
         };
 
+        // An ignored interface may match a current interface which already
+        // carries `state: ignore` (persisted ignore) making the apply diff
+        // empty.  `sanitize()` still has to process the entry (e.g. MAC
+        // normalization for the save state), so give it a non-empty
+        // `for_apply`; it is dropped below anyway.
+        if ignored && ret.for_apply.is_none() {
+            ret.for_apply = ret.for_save.clone();
+        }
+
         ret.sanitize(saved)?;
+
+        if ignored {
+            // `state: ignore` requests the interface to be unmanaged: the
+            // entry is persisted (`for_save`) so later applies, the hotplug
+            // path and the WIFI plugin binding all know about it, but it is
+            // never applied, verified nor reverted.
+            ret.for_apply = None;
+            ret.for_verify = None;
+            ret.for_revert = None;
+        }
 
         if saved_only {
             // `state: saved` requests save-only: the config is persisted but
@@ -251,6 +273,20 @@ impl MergedInterface {
         ctrl_type: InterfaceType,
         ctrl_state: InterfaceState,
     ) -> Result<(), NipartError> {
+        if self
+            .desired
+            .as_ref()
+            .is_some_and(|desired| desired.is_ignore())
+        {
+            // A port explicitly marked `state: ignore` must not be attached
+            // or brought up because its (desired) controller asks for it.
+            log::info!(
+                "Ignoring controller change for interface {} as it is marked \
+                 `state: ignore`",
+                self.merged.name()
+            );
+            return Ok(());
+        }
         if self.merged.base_iface().need_controller()
             && ctrl_name.is_empty()
             && let Some(org_ctrl) = self

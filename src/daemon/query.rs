@@ -65,7 +65,7 @@ impl NipartCommander {
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
         for iface in state.ifaces.iter_mut() {
-            if iface.is_userspace() || iface.is_absent() {
+            if iface.is_userspace() || iface.is_absent() || iface.is_ignore() {
                 continue;
             }
             iface.base_iface_mut().state =
@@ -214,10 +214,25 @@ fn merge_saved_into_running(
                 .find(|cur_iface| saved_iface.is_match(cur_iface))
         };
         let Some(cur_iface) = cur_iface else {
-            saved_iface.base_iface_mut().state = InterfaceState::Saved;
+            // A saved `state: ignore` profile stays `state: ignore` when its
+            // NIC is absent: the user marked the NIC as unmanaged, not as an
+            // inactive profile.
+            saved_iface.base_iface_mut().state = if saved_iface.is_ignore() {
+                InterfaceState::Ignore
+            } else {
+                InterfaceState::Saved
+            };
             saved_only_ifaces.push(saved_iface);
             continue;
         };
+        if saved_iface.is_ignore() {
+            // The persisted `state: ignore` marks the NIC as unmanaged:
+            // surface it on the running interface (so applies and the WIFI
+            // plugin binding skip it) and do not treat its saved entry as an
+            // active profile.
+            cur_iface.base_iface_mut().state = InterfaceState::Ignore;
+            continue;
+        }
         managed_ifaces.insert(cur_iface.kernel_iface_name().to_string());
         // Multiple saved configs may resolve to the same running interface
         // (e.g. a name-matched and a MAC-matched config for the same NIC),

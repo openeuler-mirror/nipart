@@ -79,3 +79,25 @@ fn test_no_expand_when_wifi_phy_not_connected() {
 
     assert!(!desired.kernel_ifaces.contains_key("wlan0"));
 }
+
+#[test]
+fn test_no_expand_wifi_cfg_to_ignored_phy() {
+    let mut desired = wifi_cfg_desired();
+    let current: Interfaces = rmsd_yaml::from_str(
+        r#"---
+            - name: wlan0
+              type: wifi-phy
+              state: ignore
+              link-state: up
+              mac-address: 02:00:00:00:00:01
+              permanent-mac-address: 02:00:00:00:00:01
+              wifi:
+                ssid: HomeWiFi
+            "#,
+    )
+    .unwrap();
+
+    expand_wifi_cfg_to_connected_phy(&mut desired, &current);
+
+    assert!(!desired.kernel_ifaces.contains_key("wlan0"));
+}

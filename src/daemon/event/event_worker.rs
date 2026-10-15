@@ -122,6 +122,11 @@ impl NipartEventWorker {
         let mut cur_state =
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
+        // The kernel-only query cannot know about persisted `state: ignore`
+        // profiles: mark their NICs as ignored before the merge, otherwise
+        // `post_merge_sanitize_wifi()` would bring such a phy up and bind
+        // the saved WIFI profiles to it.
+        mark_saved_ignored_phys(&mut cur_state, &saved_state);
         let mut desired_state = NetworkState::default();
         let mut rearm_monitors = false;
         // Virtual interfaces already added to `desired_state` because a
@@ -153,6 +158,16 @@ impl NipartEventWorker {
                 log::trace!(
                     "Ignoring stale link-down event {event}: current link \
                      state is up"
+                );
+                continue;
+            }
+
+            // A NIC whose saved config is `state: ignore` is unmanaged: no
+            // auto-connect, no WIFI profile handoff, no IP purge.
+            if saved_state_ignores_event(&saved_state, &event, &cur_state) {
+                log::trace!(
+                    "Ignoring event {event}: the interface is marked `state: \
+                     ignore`"
                 );
                 continue;
             }
@@ -520,6 +535,7 @@ fn gen_missing_virtual_dependents(
         if !saved_iface.is_virtual()
             || saved_iface.is_userspace()
             || saved_iface.is_absent()
+            || saved_iface.is_ignore()
             || saved_iface.base_iface().auto_connect.as_ref()
                 == Some(&InterfaceAutoConnect::Manual)
         {
@@ -603,6 +619,41 @@ fn virtual_depends_on_event(
     saved_iface
         .parent()
         .is_some_and(|parent| event_names.contains(parent))
+}
+
+/// Mark the kernel interfaces matched by a saved `state: ignore` profile as
+/// ignored, mirroring the daemon's running query.
+fn mark_saved_ignored_phys(
+    cur_state: &mut NetworkState,
+    saved_state: &NetworkState,
+) {
+    let ignored_ifaces: Vec<&Interface> = saved_state
+        .ifaces
+        .iter()
+        .filter(|iface| iface.is_ignore())
+        .collect();
+    if ignored_ifaces.is_empty() {
+        return;
+    }
+    for cur_iface in cur_state.ifaces.kernel_ifaces.values_mut() {
+        if ignored_ifaces
+            .iter()
+            .any(|ignored| ignored.is_match(cur_iface))
+        {
+            cur_iface.base_iface_mut().state = InterfaceState::Ignore;
+        }
+    }
+}
+
+/// Whether the saved state marks the event's NIC as `state: ignore`.
+fn saved_state_ignores_event(
+    saved_state: &NetworkState,
+    event: &InterfaceLinkEvent,
+    cur_state: &NetworkState,
+) -> bool {
+    saved_state.ifaces.iter().any(|iface| {
+        iface.is_ignore() && saved_iface_matches_event(iface, event, cur_state)
+    })
 }
 
 /// Whether the saved interface is the kernel interface the event reports:

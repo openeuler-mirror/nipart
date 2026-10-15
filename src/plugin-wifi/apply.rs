@@ -437,15 +437,34 @@ impl WifiClientState {
         // one (a transient `mac80211_hwsim` radio could otherwise take the
         // only slot and leave the real wifi-phy without the profile).
         let up_wifi_phys = up_wifi_phys(ifaces);
+        // `state: ignore` wifi-phys are unmanaged: never bind a profile to
+        // them and never treat them as an eligible phy.  The daemon adds a
+        // marker interface with `state: ignore` per ignored wifi-phy to the
+        // apply state.
+        let ignored_wifi_phys: HashSet<String> = ifaces
+            .iter()
+            .filter(|iface| {
+                iface.is_ignore()
+                    && iface.iface_type() == &InterfaceType::WifiPhy
+            })
+            .map(|iface| iface.kernel_iface_name().to_string())
+            .collect();
         // An apply which only carries saved `wifi-cfg` profiles (e.g. the
         // event worker handing the saved WIFI picture to the plugin when a
         // new wifi-phy appears) brings up no phy name itself: fall back to
-        // every phy present in the kernel for unbound profiles.
-        let mut present_wifi_phys: Vec<String> =
-            wifi_phys_if_index.keys().cloned().collect();
+        // every phy present in the kernel for unbound profiles, excluding
+        // the ignored ones.
+        let mut present_wifi_phys: Vec<String> = wifi_phys_if_index
+            .keys()
+            .filter(|name| !ignored_wifi_phys.contains(*name))
+            .cloned()
+            .collect();
         present_wifi_phys.sort_unstable();
 
         for iface in ifaces {
+            if iface.is_ignore() {
+                continue;
+            }
             let wifi_cfg = match iface {
                 Interface::WifiCfg(iface) => iface.wifi.as_ref(),
                 Interface::WifiPhy(iface) => iface.wifi.as_ref(),
@@ -531,6 +550,30 @@ impl WifiClientState {
             if self.ifaces.remove(*iface_name).is_some() {
                 log::info!("Disconnecting WIFI on {iface_name}");
                 recreate = true;
+            }
+        }
+
+        // A `state: ignore` wifi-phy is unmanaged: an interface the plugin
+        // was already managing (e.g. one connected before the ignore was
+        // applied) must be disconnected and dropped here. Keeping it in
+        // the managed set would let a later client restart (`npt wifi on`,
+        // driver reload, phy re-creation) or the saved-profile fallback
+        // adopt it again.
+        for iface_name in &ignored_wifi_phys {
+            if self.ifaces.remove(iface_name).is_some() {
+                log::info!(
+                    "Disconnecting WIFI on {iface_name} (state: ignore)"
+                );
+                if let Some(client) = self.client.as_mut()
+                    && let Err(e) = client.remove_iface(iface_name).await
+                {
+                    log::warn!(
+                        "WIFI {iface_name} failed to remove interface from \
+                         client: {e}"
+                    );
+                }
+                self.clear_live_iface(iface_name);
+                self.clear_connect_error(iface_name);
             }
         }
 

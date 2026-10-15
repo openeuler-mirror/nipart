@@ -70,6 +70,15 @@ pub(crate) fn expand_wifi_cfg_to_connected_phy(
         else {
             continue;
         };
+        if cur_phy.is_ignore() {
+            log::debug!(
+                "Skipping wifi-cfg {}/{} IP expansion onto ignored wifi-phy {}",
+                wifi_cfg.name(),
+                wifi_cfg.iface_type(),
+                cur_phy.kernel_iface_name(),
+            );
+            continue;
+        }
         let phy_name = cur_phy.kernel_iface_name().to_string();
         if desired.kernel_ifaces.contains_key(&phy_name) {
             continue;
@@ -113,6 +122,7 @@ impl MergedInterfaces {
                     .filter(|(_, merged_iface)| {
                         merged_iface.merged.iface_type()
                             == &InterfaceType::WifiPhy
+                            && !merged_iface.merged.is_ignore()
                             && merged_iface.current.is_some()
                     })
                     .map(|(name, _)| name.clone()),
@@ -149,10 +159,11 @@ impl MergedInterfaces {
         for merged_iface in
             self.kernel_ifaces.values_mut().filter(|merged_iface| {
                 merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                    && !merged_iface.merged.is_ignore()
                     && merged_iface
                         .desired
                         .as_ref()
-                        .map(|i| i.is_absent() || i.is_down() || i.is_ignore())
+                        .map(|i| i.is_absent() || i.is_down())
                         != Some(true)
                     && merged_iface.current.is_some()
                     && phy_names_to_bring_up

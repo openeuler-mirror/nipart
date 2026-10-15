@@ -102,6 +102,11 @@ impl NipartCommander {
                 .await?;
             let connected =
                 cur_state.ifaces.kernel_ifaces.values().any(|cur_iface| {
+                    // A `state: ignore` phy is unmanaged: its live
+                    // association does not reflect this action.
+                    if cur_iface.base_iface().state.is_ignore() {
+                        return false;
+                    }
                     let Interface::WifiPhy(wifi_phy) = cur_iface else {
                         return false;
                     };

@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 
 use nipart::{
-    DnsResolver, ErrorKind, Interface, InterfaceAutoConnect, InterfaceType,
-    MergedNetworkState, NetworkState, NipartApplyOption, NipartError,
-    NipartInterface, NipartIpcConnection, NipartNoDaemon, NipartQueryOption,
-    NipartWifiConnectErrorOption,
+    DnsResolver, ErrorKind, Interface, InterfaceAutoConnect, InterfaceState,
+    InterfaceType, MergedInterfaces, MergedNetworkState, NetworkState,
+    NipartApplyOption, NipartError, NipartInterface, NipartIpcConnection,
+    NipartNoDaemon, NipartQueryOption, NipartWifiConnectErrorOption,
 };
 
 use super::{commander::NipartCommander, dhcp::is_fatal_wifi_connect_error};
@@ -120,12 +120,27 @@ fn wifi_connect_requests(
             }
             Interface::WifiCfg(cfg) => {
                 if let Some(ssid) = cfg.ssid().filter(|ssid| !ssid.is_empty()) {
+                    let base_iface = cfg
+                        .wifi
+                        .as_ref()
+                        .and_then(|wifi| wifi.base_iface.clone());
+                    if !wifi_connect_request_has_eligible_phy(
+                        merged_state,
+                        base_iface.as_deref(),
+                    ) {
+                        // Every phy this profile could bind to is marked
+                        // `state: ignore` (unmanaged): the request can never
+                        // be satisfied, waiting for it would only fail the
+                        // apply after the timeout.
+                        log::debug!(
+                            "Skipping wifi connect wait for {ssid}: no \
+                             eligible (non-ignored) wifi-phy"
+                        );
+                        continue;
+                    }
                     ret.push(WifiConnectRequest {
                         ssid: ssid.to_string(),
-                        base_iface: cfg
-                            .wifi
-                            .as_ref()
-                            .and_then(|wifi| wifi.base_iface.clone()),
+                        base_iface,
                     });
                 }
             }
@@ -133,6 +148,73 @@ fn wifi_connect_requests(
         }
     }
     ret
+}
+
+/// Whether a WIFI connect request can be satisfied by an eligible phy.
+///
+/// The explicitly targeted phy (`base_iface`) or, for an unbound profile,
+/// every present wifi-phy may be marked `state: ignore`: such phys are
+/// unmanaged and must never be bound to a profile.
+fn wifi_connect_request_has_eligible_phy(
+    merged_state: &MergedNetworkState,
+    base_iface: Option<&str>,
+) -> bool {
+    let ignored_phys: Vec<&str> = merged_state
+        .ifaces
+        .kernel_ifaces
+        .values()
+        .filter(|merged_iface| {
+            merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                && merged_iface.merged.is_ignore()
+        })
+        .map(|merged_iface| merged_iface.merged.kernel_iface_name())
+        .collect();
+    if ignored_phys.is_empty() {
+        return true;
+    }
+    if let Some(base_iface) = base_iface {
+        // Only the requested phy matters: a request targeting another
+        // (non-ignored) phy is unaffected.
+        return !merged_state.ifaces.kernel_ifaces.values().any(
+            |merged_iface| {
+                merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                    && merged_iface.merged.is_ignore()
+                    && (merged_iface.merged.kernel_iface_name() == base_iface
+                        || merged_iface.merged.name() == base_iface
+                        || merged_iface
+                            .merged
+                            .base_iface()
+                            .profile_name
+                            .as_deref()
+                            == Some(base_iface))
+            },
+        );
+    }
+    // An unbound profile: skip the wait only when every present wifi-phy is
+    // ignored.
+    let present_count = merged_state
+        .ifaces
+        .kernel_ifaces
+        .values()
+        .filter(|merged_iface| {
+            merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                && merged_iface.current.is_some()
+        })
+        .count();
+    if present_count == 0 {
+        return true;
+    }
+    let ignored_present_count = merged_state
+        .ifaces
+        .kernel_ifaces
+        .values()
+        .filter(|merged_iface| {
+            merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                && merged_iface.current.is_some()
+                && merged_iface.merged.is_ignore()
+        })
+        .count();
+    ignored_present_count != present_count
 }
 
 /// Whether an apply waits for the WIFI associations it requests.
@@ -506,7 +588,10 @@ impl NipartCommander {
             opt.clone(),
         )?;
 
-        let apply_state = merged_state.gen_state_for_apply();
+        let mut apply_state = merged_state.gen_state_for_apply();
+        for marker in ignored_wifi_phy_markers(&merged_state.ifaces) {
+            apply_state.ifaces.push(marker);
+        }
 
         NipartNoDaemon::apply_merged_state(&mut merged_state).await?;
         apply_dns_resolver(
@@ -519,7 +604,8 @@ impl NipartCommander {
             .apply_network_state(&apply_state, &opt)
             .await?;
         if revert_touches_wifi {
-            self.restore_saved_wifi_profiles().await?;
+            self.restore_saved_wifi_profiles(&merged_state.ifaces)
+                .await?;
         }
 
         self.dhcpv4_manager
@@ -554,13 +640,19 @@ impl NipartCommander {
     /// The restore is `memory-only` (the saved state is unchanged) and
     /// applies only to the plugin: the link-up event path configures the
     /// IP stack again once shuli associates.
-    async fn restore_saved_wifi_profiles(&mut self) -> Result<(), NipartError> {
+    async fn restore_saved_wifi_profiles(
+        &mut self,
+        merged_ifaces: &MergedInterfaces,
+    ) -> Result<(), NipartError> {
         let saved_state = self.conf_manager.query_state().await?;
-        let wifi_state = saved_wifi_restore_state(&saved_state);
+        let mut wifi_state = saved_wifi_restore_state(&saved_state);
         if wifi_state.is_empty() {
             return Ok(());
         }
         log::info!("Restoring saved WIFI profiles after rollback");
+        for marker in ignored_wifi_phy_markers(merged_ifaces) {
+            wifi_state.ifaces.push(marker);
+        }
         let opt = NipartApplyOption::new().memory_only().no_verify();
         self.plugin_manager
             .apply_network_state(&wifi_state, &opt)
@@ -666,7 +758,13 @@ impl NipartCommander {
         mut conn: Option<&mut NipartIpcConnection>,
         merged_state: &MergedNetworkState,
     ) -> Result<(), NipartError> {
-        let apply_state = merged_state.gen_state_for_apply();
+        let mut apply_state = merged_state.gen_state_for_apply();
+        // Tell the WIFI plugin which wifi-phys are marked `state: ignore` so
+        // an unbound `wifi-cfg` (or one bound by `base-iface`) never binds
+        // to them.  The kernel apply uses the merged state, not this list.
+        for marker in ignored_wifi_phy_markers(&merged_state.ifaces) {
+            apply_state.ifaces.push(marker);
+        }
 
         log_trace(conn.as_deref_mut(), format!("apply_state {apply_state}"))
             .await;
@@ -698,6 +796,7 @@ impl NipartCommander {
             self.wait_wifi_connect_requests(
                 conn.as_deref_mut(),
                 &wifi_connect_requests(merged_state),
+                merged_state,
             )
             .await?;
         }
@@ -768,6 +867,7 @@ impl NipartCommander {
         &mut self,
         conn: Option<&mut NipartIpcConnection>,
         requests: &[WifiConnectRequest],
+        merged_state: &MergedNetworkState,
     ) -> Result<(), NipartError> {
         if requests.is_empty() {
             return Ok(());
@@ -780,7 +880,24 @@ impl NipartCommander {
         let kernel_state =
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
-        let phy_names = wifi_phy_names(&kernel_state);
+        // An unbound profile is handed to every wifi-phy by the plugin, but
+        // never to a `state: ignore` (unmanaged) one: exclude those from the
+        // wait, otherwise the apply would fail waiting for a connection the
+        // plugin deliberately does not make.
+        let ignored_phys: HashSet<&str> = merged_state
+            .ifaces
+            .kernel_ifaces
+            .values()
+            .filter(|merged_iface| {
+                merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                    && merged_iface.merged.is_ignore()
+            })
+            .map(|merged_iface| merged_iface.merged.kernel_iface_name())
+            .collect();
+        let phy_names: Vec<String> = wifi_phy_names(&kernel_state)
+            .into_iter()
+            .filter(|name| !ignored_phys.contains(name.as_str()))
+            .collect();
         if phy_names.is_empty() {
             log::debug!(
                 "No WIFI phy present, skipping the WIFI connection wait"
@@ -1181,10 +1298,33 @@ fn verify_dns(
     Ok(())
 }
 
-/// The subset of a saved state that hands the WIFI profiles back to the
-/// plugin after a rollback: the wifi-phy and every auto-connectable
-/// wifi-cfg profile.
+/// `state: ignore` markers handed to the WIFI plugin.
 ///
+/// The plugin only receives the state to apply.  An unbound `wifi-cfg`
+/// binds to every eligible wifi-phy, so the plugin must be told which
+/// wifi-phys are marked `state: ignore` (unmanaged) to keep them untouched.
+/// The daemon's kernel apply never sees these markers: the merged ignored
+/// interfaces keep `for_apply: None`.
+fn ignored_wifi_phy_markers(
+    merged_ifaces: &MergedInterfaces,
+) -> Vec<Interface> {
+    merged_ifaces
+        .kernel_ifaces
+        .values()
+        .filter(|merged_iface| {
+            merged_iface.merged.iface_type() == &InterfaceType::WifiPhy
+                && merged_iface.merged.is_ignore()
+                && !merged_iface.merged.kernel_iface_name().is_empty()
+        })
+        .map(|merged_iface| {
+            let mut base =
+                merged_iface.merged.base_iface().clone_name_type_only();
+            base.state = InterfaceState::Ignore;
+            Interface::from(base)
+        })
+        .collect()
+}
+
 /// `auto-connect: false` profiles are only activated by an explicit apply
 /// action and absent profiles were removed, so neither may come back
 /// implicitly.
@@ -1192,6 +1332,7 @@ fn saved_wifi_restore_state(saved_state: &NetworkState) -> NetworkState {
     let mut wifi_state = NetworkState::default();
     for iface in saved_state.ifaces.iter() {
         if iface.is_absent()
+            || iface.is_ignore()
             || iface.base_iface().auto_connect
                 == Some(InterfaceAutoConnect::Manual)
         {
