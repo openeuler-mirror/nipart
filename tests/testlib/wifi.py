@@ -18,6 +18,7 @@ HWSIM0_PERM_MAC = "02:00:00:00:00:00"
 HWSIM1_PERM_MAC = "02:00:00:00:01:00"
 HWSIM2_PERM_MAC = "02:00:00:00:02:00"
 TEST_NET_NS = "wifi-test"
+EXTRA_PHY_HOLD_NET_NS = "wifi-extra-phy-hold"
 TEST_WIFI_SSID = "Test-WIFI"
 TEST_WIFI_PSK = "12345678"
 TEST_WIFI_SSID_OPEN = "Test-WIFI-NOPASS"
@@ -131,24 +132,68 @@ def wifi_env():
     retry_till_true_or_timeout(10, unload_wifi_sim_kernel_module)
 
 
-def create_sim_wifi_nics():
+def create_sim_wifi_nics(hold_extra_phy=False):
     """Create the mac80211_hwsim based wifi test environment: two
     simulated NICs renamed to `WIFI_TEST_NIC` and `DHCP_SRV_NIC`, plus
-    the `TEST_NET_NS` netns for the AP side."""
+    the `TEST_NET_NS` netns for the AP side.
+
+    With `hold_extra_phy` a third radio is created and parked in the
+    `EXTRA_PHY_HOLD_NET_NS` netns. A test can then call
+    `release_held_extra_wifi_phy()` to move it into the main netns,
+    simulating a USB wifi dongle plugged in while nipart is running.
+    """
     exec_cmd("modprobe -r mac80211_hwsim".split(), check=False)
     exec_cmd(f"ip netns del {TEST_NET_NS}".split(), check=False)
+    exec_cmd(f"ip netns del {EXTRA_PHY_HOLD_NET_NS}".split(), check=False)
     exec_cmd(f"ip netns add {TEST_NET_NS}".split())
 
-    exec_cmd("modprobe mac80211_hwsim radios=2".split())
+    radios = 3 if hold_extra_phy else 2
+    exec_cmd(f"modprobe mac80211_hwsim radios={radios}".split())
     assert retry_till_true_or_timeout(
         TIMEOUT_SECS_SIM_WIFI_NICS, has_sim_wifi_nics
     )
+    if hold_extra_phy:
+        assert retry_till_true_or_timeout(
+            TIMEOUT_SECS_SIM_WIFI_NICS, has_extra_sim_wifi_nic
+        )
 
     state = nipart.show()
     wlan1 = get_nic_name_by_perm_mac(state, HWSIM0_PERM_MAC)
     exec_cmd(f"ip link set {wlan1} name {WIFI_TEST_NIC}".split())
     wlan2 = get_nic_name_by_perm_mac(state, HWSIM1_PERM_MAC)
     exec_cmd(f"ip link set {wlan2} name {DHCP_SRV_NIC}".split())
+    if hold_extra_phy:
+        extra = get_nic_name_by_perm_mac(state, HWSIM2_PERM_MAC)
+        assert extra
+        phy_id = get_wifi_phy_name(extra)
+        exec_cmd(f"ip netns add {EXTRA_PHY_HOLD_NET_NS}".split())
+        exec_cmd(
+            f"iw phy#{phy_id} set netns name {EXTRA_PHY_HOLD_NET_NS}".split()
+        )
+
+
+def release_held_extra_wifi_phy():
+    """Move the held extra wifi-phy into the main netns.
+
+    This simulates plugging a USB wifi dongle while nipart is running:
+    the kernel emits a link event for a wifi-phy nipart has not seen
+    before.
+    """
+    rc, out, _ = exec_cmd(
+        f"ip netns exec {EXTRA_PHY_HOLD_NET_NS} iw dev".split()
+    )
+    assert rc == 0, out
+    names = re.findall(r"Interface (\S+)", out)
+    assert names, f"no wifi-phy held in {EXTRA_PHY_HOLD_NET_NS}: {out}"
+    rc, out, _ = exec_cmd(
+        f"ip netns exec {EXTRA_PHY_HOLD_NET_NS} iw dev {names[0]} info".split()
+    )
+    match = re.search(r"wiphy ([0-9]+)", out)
+    assert match, out
+    exec_cmd(
+        f"ip netns exec {EXTRA_PHY_HOLD_NET_NS} iw phy#{match.group(1)} "
+        f"set netns 1".split()
+    )
 
 
 def destroy_sim_wifi_nics():
@@ -161,6 +206,7 @@ def destroy_sim_wifi_nics():
         os.kill(int(pid), signal.SIGTERM)
     stop_dhcp_server()
     exec_cmd(f"ip netns del {TEST_NET_NS}".split())
+    exec_cmd(f"ip netns del {EXTRA_PHY_HOLD_NET_NS}".split(), check=False)
     retry_till_true_or_timeout(10, unload_wifi_sim_kernel_module)
 
 
@@ -193,6 +239,12 @@ def has_sim_wifi_nics():
     wlan1 = get_nic_name_by_perm_mac(state, HWSIM0_PERM_MAC)
     wlan2 = get_nic_name_by_perm_mac(state, HWSIM1_PERM_MAC)
     return wlan1 and wlan2
+
+
+def has_extra_sim_wifi_nic():
+    exec_cmd("udevadm settle".split())
+    state = nipart.show()
+    return bool(get_nic_name_by_perm_mac(state, HWSIM2_PERM_MAC))
 
 
 def start_hostapd(timeout=2, with_dhcp=True):
@@ -282,8 +334,7 @@ def hostapd_is_up_hidden():
     # hidden network is configured, so `iw scan` on the client either
     # returns -EBUSY or hangs waiting for results.
     output = exec_cmd(
-        f"ip netns exec {TEST_NET_NS} "
-        f"iw dev {DHCP_SRV_NIC} info".split(),
+        f"ip netns exec {TEST_NET_NS} " f"iw dev {DHCP_SRV_NIC} info".split(),
         check=False,
     )[1]
     return "type AP" in output and TEST_WIFI_SSID_HIDDEN in output

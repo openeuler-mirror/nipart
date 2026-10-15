@@ -56,6 +56,7 @@ from .testlib.wifi import get_nic_name_by_perm_mac
 from .testlib.wifi import get_wifi_phy_name
 from .testlib.wifi import hostapd_is_up_2
 from .testlib.wifi import ping_wifi_peer
+from .testlib.wifi import release_held_extra_wifi_phy
 from .testlib.wifi import start_hostapd
 from .testlib.wifi import start_hostapd_2
 from .testlib.wifi import start_hostapd_hidden
@@ -1417,6 +1418,77 @@ class TestWifiPhyLater:
                       - name: {TEST_WIFI_SSID_OPEN}
                         type: wifi-cfg
                         state: absent"""))
+
+
+@pytest.fixture(scope="class")
+def wifi_extra_phy_env():
+    # WIFI_TEST_NIC + AP plus a third radio parked outside the main
+    # netns: the test moves it in to simulate the USB dongle.
+    create_sim_wifi_nics(hold_extra_phy=True)
+    exec_cmd("killall wpa_supplicant".split(), check=False)
+    start_hostapd()
+    yield
+    destroy_sim_wifi_nics()
+
+
+@pytest.mark.skipif(
+    not has_kernel_module("mac80211_hwsim"),
+    reason="Does not have 'mac80211_hwsim' kernel module",
+)
+class TestWifiPhyHotplug:
+    """A wifi-phy appearing while another one is connected (e.g. a USB
+    dongle plugged in) must be added to the running WIFI client without
+    dropping the established connection."""
+
+    def test_new_phy_insert_keeps_connection(self, wifi_extra_phy_env):
+        try:
+            rc, out, err = _wifi_connect(TEST_WIFI_SSID, TEST_WIFI_PSK)
+            assert rc == 0, f"npt wifi connect failed:\n{out}\n{err}"
+            assert connected_ssid() == TEST_WIFI_SSID
+
+            # "Plug the USB dongle": a new wifi-phy appears.
+            release_held_extra_wifi_phy()
+
+            # The established connection must survive the new phy.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                assert connected_ssid() == TEST_WIFI_SSID, (
+                    "established WIFI connection dropped when a new "
+                    "wifi-phy appeared"
+                )
+                time.sleep(0.2)
+
+            assert retry_till_true_or_timeout(
+                60, lambda: new_phy_connected_ssid() == TEST_WIFI_SSID
+            ), (
+                "the new wifi-phy did not connect: "
+                f"{new_phy_connected_ssid()}"
+            )
+            assert connected_ssid() == TEST_WIFI_SSID
+        finally:
+            nipart.apply(load_yaml(f"""---
+                    interfaces:
+                      - name: {TEST_WIFI_SSID}
+                        type: wifi-cfg
+                        state: absent"""))
+
+
+def _find_nic_by_mac(mac):
+    """Kernel NIC name owning `mac`, searched without the daemon."""
+    for nic in os.listdir("/sys/class/net"):
+        try:
+            with open(f"/sys/class/net/{nic}/address") as fd:
+                if fd.read().strip() == mac:
+                    return nic
+        except OSError:
+            continue
+    return None
+
+
+def new_phy_connected_ssid():
+    """SSID connected on the extra hwsim radio, or None."""
+    nic = _find_nic_by_mac(HWSIM2_PERM_MAC)
+    return iface_connected_ssid(nic) if nic else None
 
 
 @pytest.mark.skipif(

@@ -26,9 +26,10 @@ use crate::hints;
 pub(crate) struct WifiIfaceState {
     /// Kernel if_index of the phy the client was bound to at creation.
     /// When the phy is recreated (e.g. wifi driver module reload), the
-    /// cached client targets a device that no longer exists, so this
-    /// value is compared against the current kernel if_index on each
-    /// apply and the single client is recreated on mismatch.
+    /// cached client binding for this name targets a device that no
+    /// longer exists, so this value is compared against the current
+    /// kernel if_index on each apply and the interface is removed from
+    /// and re-added to the live client on mismatch.
     if_index: u32,
     desired_networks: Vec<ShuliNetworkConfig>,
 }
@@ -546,10 +547,20 @@ impl WifiClientState {
         let mut recreate = false;
 
         // Remove clients for phys explicitly absent/down in this apply.
+        // Only the named interfaces are disconnected: the single shuli
+        // client stays alive for every other phy.
         for iface_name in &iface_names_to_delete {
             if self.ifaces.remove(*iface_name).is_some() {
                 log::info!("Disconnecting WIFI on {iface_name}");
-                recreate = true;
+                if let Some(client) = self.client.as_mut()
+                    && let Err(e) = client.remove_iface(iface_name).await
+                {
+                    log::warn!(
+                        "WIFI {iface_name} failed to remove interface from \
+                         client: {e}"
+                    );
+                }
+                self.clear_live_iface(iface_name);
             }
         }
 
@@ -578,7 +589,9 @@ impl WifiClientState {
         }
 
         // Update the per-interface desired state. A phy that was
-        // recreated (or is gone) forces the single client to be rebuilt.
+        // recreated (or is gone) has its stale client binding dropped
+        // here; a still-present phy is re-added below from the desired
+        // state, so the other phys keep their connection.
         let iface_names: Vec<String> = self.ifaces.keys().cloned().collect();
         let mut pending_networks: HashMap<String, Vec<ShuliNetworkConfig>> =
             HashMap::new();
@@ -591,11 +604,18 @@ impl WifiClientState {
                 .is_none_or(|if_index| *if_index != iface_state.if_index)
             {
                 log::warn!(
-                    "WIFI {iface_name} device changed or gone, restarting \
-                     client"
+                    "WIFI {iface_name} device changed or gone, re-adding it"
                 );
                 self.ifaces.remove(&iface_name);
-                recreate = true;
+                if let Some(client) = self.client.as_mut()
+                    && let Err(e) = client.remove_iface(&iface_name).await
+                {
+                    log::warn!(
+                        "WIFI {iface_name} failed to remove interface from \
+                         client: {e}"
+                    );
+                }
+                self.clear_live_iface(&iface_name);
                 continue;
             }
             // An apply that does not mention this phy (e.g. the daemon
@@ -675,6 +695,26 @@ impl WifiClientState {
             } else {
                 build_shuli_networks(wifi_cfgs, &hint_map)?
             };
+            // With a live client, add the phy to it: the shared nl80211
+            // socket and event dispatcher keep every other phy's
+            // connection untouched. Without a client (first apply or
+            // after a restart) the phy is recorded and the whole client
+            // is started below.
+            match self.client.as_mut() {
+                Some(client) => {
+                    let mut config = ShuliWifiConfig::new(iface_name);
+                    config.networks = networks.clone();
+                    if let Err(e) = client.add_iface(config).await {
+                        log::warn!(
+                            "WIFI {iface_name} failed to add interface to \
+                             client: {e}"
+                        );
+                        continue;
+                    }
+                    self.clear_connect_error(iface_name);
+                }
+                None => recreate = true,
+            }
             self.ifaces.insert(
                 iface_name.clone(),
                 WifiIfaceState {
@@ -682,7 +722,15 @@ impl WifiClientState {
                     desired_networks: networks,
                 },
             );
-            recreate = true;
+        }
+
+        // No phy left to manage: stop the client instead of leaving a
+        // client without interfaces (whose `run()` always errors).
+        if self.ifaces.is_empty() && self.client.is_some() {
+            log::info!("No WIFI interface left, shutting down the client");
+            self.shutdown().await;
+            self.client = None;
+            return Ok(());
         }
 
         // While WIFI is disabled, keep the desired network bookkeeping up
@@ -707,15 +755,12 @@ impl WifiClientState {
                     iface_state.desired_networks = networks;
                 }
             }
-            if let Some(client) = self.client.as_mut() {
-                client.shutdown().await;
-            }
             self.start_client().await;
             return Ok(());
         }
 
-        // Update the existing client in place when no interface was
-        // added, removed, or recreated.
+        // Only network lists or preferences changed: update the existing
+        // client in place, leaving every live connection alone.
         let preferred_ssids: HashMap<String, Option<String>> = desired
             .iter()
             .filter(|(_, wifi_cfgs)| force && wifi_cfgs.len() == 1)
