@@ -199,7 +199,15 @@ impl NipartCommander {
                 .await?;
         }
 
-        let opt = NipartApplyOption::new().memory_only().force();
+        // `no_wifi_connect_wait`: a down WIFI profile hands the remaining
+        // saved profiles to the plugin, which reconnects to the best of
+        // them by itself. That re-association may need a full scan, so it
+        // must not block the command; `wait_for_iface_action()` (outside
+        // the transaction lock) waits for the target SSID to disappear.
+        let opt = NipartApplyOption::new()
+            .memory_only()
+            .force()
+            .no_wifi_connect_wait();
         let result = self
             .apply_network_state_with_saved_config(
                 None,

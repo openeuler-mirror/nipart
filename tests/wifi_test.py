@@ -1733,6 +1733,42 @@ class TestWifiMultiSsid:
             "returned"
         )
 
+    def test_npt_down_does_not_wait_for_other_ssid(self, multi_ap_env):
+        # `npt down` must return once the target SSID is disconnected. The
+        # remaining saved profiles stay eligible and the plugin moves to
+        # the best of them in the background; waiting for that association
+        # made the command burn the full WIFI connect timeout when the
+        # remaining profile was unreachable.
+        missing_ssid = "No-Such-SSID-XY"
+        both = load_yaml(
+            wifi_cfg_state_yaml(
+                (TEST_WIFI_SSID, TEST_WIFI_PSK, "up"),
+                (missing_ssid, None, "up"),
+            )
+        )
+        try:
+            nipart.apply(both)
+            assert wait_for_ssid(TEST_WIFI_SSID)
+            start = time.time()
+            rc, out, err = exec_cmd(
+                [CLI_PATH, "down", TEST_WIFI_SSID], check=False
+            )
+            elapsed = time.time() - start
+            assert rc == 0, f"npt down failed:\n{out}\n{err}"
+            assert elapsed < 30, (
+                f"`npt down {TEST_WIFI_SSID}` took {elapsed:.1f}s: the "
+                "daemon waited for the unreachable remaining profile to "
+                "associate"
+            )
+            assert connected_ssid() != TEST_WIFI_SSID, (
+                f"expected wifi to leave {TEST_WIFI_SSID} before `npt down` "
+                "returned"
+            )
+        finally:
+            nipart.apply(
+                load_yaml(wifi_cfg_state_yaml((missing_ssid, None, "absent")))
+            )
+
     def test_wifi_cfg_bssid_pin(self, multi_ap_env):
         # Pin the open profile to AP2's BSSID: nipart must hand the pin
         # to shuli and connect to exactly that AP.
