@@ -210,11 +210,15 @@ impl Interfaces {
                 // TODO: For now, we raise error for not found, but we might
                 //       need to allow user store config without apply.
                 if kernel_iface_names.is_empty() {
-                    if des_iface.state.is_absent() {
+                    if des_iface.state.is_absent()
+                        || des_iface.state.is_ignore()
+                    {
                         // Removing a saved MAC-identified profile does not
                         // need a live NIC: the NIC may already be gone
                         // (e.g. dock unplug), and the absent apply only
-                        // needs to drop the saved config.
+                        // needs to drop the saved config.  A
+                        // `state: ignore` entry must be persistable even
+                        // when the NIC is currently absent.
                         Ok(None)
                     } else {
                         Err(NipartError::new(

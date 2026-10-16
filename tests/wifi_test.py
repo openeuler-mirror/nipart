@@ -1992,3 +1992,187 @@ class TestWifiDhcpSwitch:
                     type: dummy
                     state: absent
                 """))
+
+
+# The second host-side client phy used by the `state: ignore` tests.
+IGNORED_TEST_NIC = "test-wlan1"
+
+
+@pytest.fixture(scope="class")
+def wifi_two_client_env():
+    """mac80211_hwsim with two host-side client phys and the usual AP.
+
+    `WIFI_TEST_NIC` is the managed phy, `IGNORED_TEST_NIC` is the phy the
+    tests mark `state: ignore`, and `DHCP_SRV_NIC` is moved into the test
+    netns for hostapd.
+    """
+    exec_cmd("modprobe -r mac80211_hwsim".split(), check=False)
+    exec_cmd(f"ip netns del {TEST_NET_NS}".split(), check=False)
+    exec_cmd(f"ip netns add {TEST_NET_NS}".split())
+
+    exec_cmd("modprobe mac80211_hwsim radios=3".split())
+    assert retry_till_true_or_timeout(
+        TIMEOUT_SECS_SIM_WIFI_NICS, has_three_sim_wifi_nics
+    )
+
+    state = nipart.show()
+    exec_cmd("killall wpa_supplicant".split(), check=False)
+    nic = get_nic_name_by_perm_mac(state, HWSIM0_PERM_MAC)
+    exec_cmd(f"ip link set {nic} name {WIFI_TEST_NIC}".split())
+    nic = get_nic_name_by_perm_mac(state, HWSIM1_PERM_MAC)
+    exec_cmd(f"ip link set {nic} name {IGNORED_TEST_NIC}".split())
+    nic = get_nic_name_by_perm_mac(state, HWSIM2_PERM_MAC)
+    exec_cmd(f"ip link set {nic} name {DHCP_SRV_NIC}".split())
+    start_hostapd()
+    yield
+
+    if os.path.exists(HOSTAPD_CONF_PATH):
+        os.remove(HOSTAPD_CONF_PATH)
+    if os.path.exists(HOSTAPD_PID_PATH):
+        with open(HOSTAPD_PID_PATH) as fd:
+            pid = fd.read()
+        os.kill(int(pid), signal.SIGTERM)
+    stop_dhcp_server()
+    exec_cmd(f"ip netns del {TEST_NET_NS}".split(), check=False)
+    retry_till_true_or_timeout(10, unload_wifi_sim_kernel_module)
+
+
+@pytest.mark.skipif(
+    not has_kernel_module("mac80211_hwsim"),
+    reason="Does not have 'mac80211_hwsim' module",
+)
+class TestWifiIgnore:
+    """A wifi-phy marked `state: ignore` is persisted as unmanaged.
+
+    Neither `npt apply` nor a later `npt up` may bind the saved wifi-cfg
+    profiles to it; clearing the ignore with `state: up` makes it eligible
+    again.
+    """
+
+    IGNORE_PROFILE = "ignored-wifi-phy"
+
+    def _phy_mac(self):
+        with open(f"/sys/class/net/{IGNORED_TEST_NIC}/address") as fd:
+            return fd.read().strip().upper()
+
+    def _phy_yaml(self, mac, state):
+        return load_yaml(f"""---
+            interfaces:
+              - name: {self.IGNORE_PROFILE}
+                type: wifi-phy
+                identifier: mac-address
+                mac-address: {mac}
+                state: {state}""")
+
+    def test_ignored_phy_never_gets_wifi_cfg(self, wifi_two_client_env):
+        mac = self._phy_mac()
+        try:
+            nipart.apply(self._phy_yaml(mac, "ignore"), verify_change=False)
+
+            # The persisted ignore shows up in the query.
+            assert show_only(IGNORED_TEST_NIC)["state"] == "ignore"
+            client = nipart.NipartClient()
+            saved = client.query_network_state(
+                nipart.NipartQueryOption.saved()
+            )
+            ignored = next(
+                (
+                    iface
+                    for iface in saved["interfaces"]
+                    if iface["name"] == self.IGNORE_PROFILE
+                ),
+                None,
+            )
+            assert (
+                ignored is not None
+            ), "the `state: ignore` profile was not persisted"
+
+            # An unbound wifi-cfg must connect only on the managed phy.
+            nipart.apply(_wifi_cfg_profile_yaml(TEST_WIFI_SSID, TEST_WIFI_PSK))
+            assert retry_till_true_or_timeout(
+                60, lambda: connected_ssid() == TEST_WIFI_SSID
+            )
+            time.sleep(20)
+            assert (
+                iface_connected_ssid(IGNORED_TEST_NIC) is None
+            ), "the wifi-cfg was activated on the `state: ignore` phy"
+
+            # A later `npt up` must not bind the profile to the ignored phy
+            # either (the original bug).
+            rc, out, err = exec_cmd(
+                [npt_path(), "up", TEST_WIFI_SSID], check=False
+            )
+            assert rc == 0, f"npt up failed:\n{out}\n{err}"
+            time.sleep(20)
+            assert (
+                iface_connected_ssid(IGNORED_TEST_NIC) is None
+            ), "npt up activated the wifi-cfg on the `state: ignore` phy"
+            assert connected_ssid() == TEST_WIFI_SSID
+
+            # Clearing the ignore makes the phy eligible again.
+            nipart.apply(self._phy_yaml(mac, "up"), verify_change=False)
+            rc, out, err = exec_cmd(
+                [npt_path(), "up", TEST_WIFI_SSID], check=False
+            )
+            assert rc == 0, f"npt up failed:\n{out}\n{err}"
+            assert retry_till_true_or_timeout(
+                60,
+                lambda: iface_connected_ssid(IGNORED_TEST_NIC)
+                == TEST_WIFI_SSID,
+            ), (
+                "the wifi-cfg did not connect after the phy ignore was "
+                f"cleared: {iface_connected_ssid(IGNORED_TEST_NIC)}"
+            )
+        finally:
+            nipart.apply(self._phy_yaml(mac, "absent"), verify_change=False)
+            nipart.apply(load_yaml(f"""---
+                interfaces:
+                  - name: {TEST_WIFI_SSID}
+                    type: wifi-cfg
+                    state: absent"""))
+
+    def test_ignoring_connected_phy_disconnects_it(self, wifi_two_client_env):
+        mac = self._phy_mac()
+        try:
+            # Both phys are eligible, so the unbound wifi-cfg connects on
+            # both of them.
+            nipart.apply(_wifi_cfg_profile_yaml(TEST_WIFI_SSID, TEST_WIFI_PSK))
+            assert retry_till_true_or_timeout(
+                60,
+                lambda: iface_connected_ssid(IGNORED_TEST_NIC)
+                == TEST_WIFI_SSID,
+            ), "the second phy did not connect to the SSID"
+
+            # Marking the connected phy `state: ignore` disconnects it;
+            # the managed phy keeps its link.
+            nipart.apply(self._phy_yaml(mac, "ignore"), verify_change=False)
+            assert retry_till_true_or_timeout(
+                30, lambda: iface_connected_ssid(IGNORED_TEST_NIC) is None
+            ), "the `state: ignore` phy was not disconnected"
+            time.sleep(20)
+            assert (
+                iface_connected_ssid(IGNORED_TEST_NIC) is None
+            ), "the `state: ignore` phy reconnected"
+            assert connected_ssid() == TEST_WIFI_SSID
+
+            # A WIFI off/on cycle must not re-adopt the ignored phy.
+            exec_cmd([npt_path(), "wifi", "down"])
+            assert retry_till_true_or_timeout(
+                30, lambda: connected_ssid() is None
+            ), "wifi down did not disconnect the managed phy"
+            exec_cmd([npt_path(), "wifi", "up"])
+            assert retry_till_true_or_timeout(
+                60, lambda: connected_ssid() == TEST_WIFI_SSID
+            ), "the managed phy did not reconnect after wifi up"
+            time.sleep(20)
+            assert (
+                iface_connected_ssid(IGNORED_TEST_NIC) is None
+            ), "wifi up re-adopted the `state: ignore` phy"
+        finally:
+            exec_cmd([npt_path(), "wifi", "up"], check=False)
+            nipart.apply(self._phy_yaml(mac, "absent"), verify_change=False)
+            nipart.apply(load_yaml(f"""---
+                interfaces:
+                  - name: {TEST_WIFI_SSID}
+                    type: wifi-cfg
+                    state: absent"""))

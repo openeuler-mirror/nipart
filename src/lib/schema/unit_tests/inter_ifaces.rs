@@ -3,7 +3,7 @@
 use crate::{
     BaseInterface, DhcpState, Interface, InterfaceIdentifier, InterfaceIpv4,
     InterfaceIpv6, InterfaceState, InterfaceType, Interfaces, MergedInterfaces,
-    MergedNetworkState, NetworkState, NipartInterface,
+    MergedNetworkState, NetworkState, NipartApplyOption, NipartInterface,
 };
 
 /// Desired `state: saved` must persist the profile without applying or
@@ -4073,4 +4073,173 @@ fn test_unchanged_port_attached_to_new_controller() {
         .as_ref()
         .expect("port must be applied to attach the controller");
     assert_eq!(for_apply.base_iface().controller.as_deref(), Some("bond1"));
+}
+
+/// A desired `state: ignore` interface is persisted as unmanaged: it is
+/// stored in the saved state but never applied, verified nor reverted.
+#[test]
+fn test_desired_ignore_is_persisted_without_apply() {
+    let desired: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: usb0
+            type: ethernet
+            identifier: mac-address
+            mac-address: 02:00:00:00:00:42
+            state: ignore
+        "#,
+    )
+    .unwrap();
+    let current: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: eth9
+            type: ethernet
+            state: up
+            mac-address: 02:00:00:00:00:42
+        "#,
+    )
+    .unwrap();
+
+    let merged =
+        MergedNetworkState::new(desired, current, None, Default::default())
+            .unwrap();
+
+    // Never touched: no apply, verify nor revert state.
+    let merged_iface = merged.ifaces.kernel_ifaces.get("eth9").unwrap();
+    assert!(merged_iface.for_apply.is_none());
+    assert!(merged_iface.for_verify.is_none());
+    assert!(merged_iface.for_revert.is_none());
+    let apply_state = merged.gen_state_for_apply();
+    assert!(apply_state.ifaces.iter().next().is_none());
+
+    // Persisted with `state: ignore`.
+    let save_state = merged.gen_state_for_save();
+    let saved = save_state
+        .ifaces
+        .iter()
+        .find(|i| i.iface_type() == &InterfaceType::Ethernet)
+        .expect("ignored interface must be persisted");
+    assert_eq!(saved.base_iface().state, InterfaceState::Ignore);
+    assert_eq!(
+        saved.base_iface().mac_address.as_deref(),
+        Some("02:00:00:00:00:42")
+    );
+}
+
+/// A desired `state: up` for a persisted ignored interface overrides the
+/// ignore: the saved state becomes up again.
+#[test]
+fn test_desired_up_overrides_persisted_ignore() {
+    let desired: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: wlan1
+            type: wifi-phy
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+        "#,
+    )
+    .unwrap();
+    let saved: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: wlan1
+            type: wifi-phy
+            state: ignore
+        "#,
+    )
+    .unwrap();
+    let current: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: wlan1
+            type: wifi-phy
+            state: up
+        "#,
+    )
+    .unwrap();
+
+    let merged = MergedNetworkState::new(
+        desired,
+        current,
+        Some(saved),
+        NipartApplyOption::new().force(),
+    )
+    .unwrap();
+
+    let save_state = merged.gen_state_for_save();
+    let saved_iface = save_state
+        .ifaces
+        .iter()
+        .find(|i| i.iface_type() == &InterfaceType::WifiPhy)
+        .unwrap();
+    assert_eq!(saved_iface.base_iface().state, InterfaceState::Up);
+    let merged_iface = merged.ifaces.kernel_ifaces.get("wlan1").unwrap();
+    assert!(merged_iface.for_apply.is_some());
+}
+
+/// An ignored wifi-phy must not be force-up or get the unbound wifi-cfg
+/// applied to it.
+#[test]
+fn test_ignored_wifi_phy_not_brought_up_for_unbound_wifi_cfg() {
+    let desired: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: HomeWiFi
+            type: wifi-cfg
+            state: up
+            ipv4:
+              enabled: true
+              dhcp: true
+            wifi:
+              ssid: HomeWiFi
+          - name: wlan1
+            type: wifi-phy
+            state: ignore
+        "#,
+    )
+    .unwrap();
+    let current: NetworkState = rmsd_yaml::from_str(
+        r#"
+        interfaces:
+          - name: wlan0
+            type: wifi-phy
+            state: up
+          - name: wlan1
+            type: wifi-phy
+            state: up
+        "#,
+    )
+    .unwrap();
+
+    let merged =
+        MergedNetworkState::new(desired, current, None, Default::default())
+            .unwrap();
+    let apply_state = merged.gen_state_for_apply();
+
+    // The ignored phy is never touched.
+    assert!(!apply_state.ifaces.kernel_ifaces.contains_key("wlan1"));
+    // The unbound wifi-cfg still binds to the eligible phy.
+    assert!(apply_state.ifaces.kernel_ifaces.contains_key("wlan0"));
+    assert!(matches!(
+        apply_state.ifaces.kernel_ifaces.get("wlan0"),
+        Some(Interface::WifiPhy(_))
+    ));
+    assert!(
+        apply_state
+            .ifaces
+            .user_ifaces
+            .contains_key(&("HomeWiFi".to_string(), InterfaceType::WifiCfg))
+    );
+    // The ignored wifi-phy stays persisted as ignored.
+    let save_state = merged.gen_state_for_save();
+    let saved_phy = save_state
+        .ifaces
+        .kernel_ifaces
+        .get("wlan1")
+        .expect("ignored wifi-phy must be persisted");
+    assert_eq!(saved_phy.base_iface().state, InterfaceState::Ignore);
 }

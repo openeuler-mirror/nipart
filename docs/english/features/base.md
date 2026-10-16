@@ -71,7 +71,10 @@ The management state of the interface:
  * `down`: the interface is administratively down
  * `absent`: apply only property, request nipart to delete this interface or
    restore physical interface to kernel default state
- * `ignore`: Not managed by nipart
+ * `ignore`: Not managed by nipart. In daemon mode the entry is persisted in
+   the saved state: later applies, link events and WIFI profile binding keep
+   the interface untouched until a later apply requests another state
+   (`up`/`down`/`absent`).
  * `up-ignore`: Interface is administratively up but not managed by nipart
  * `down-ignore`: Interface is administratively down but not managed by nipart
 

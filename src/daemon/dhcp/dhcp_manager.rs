@@ -118,7 +118,7 @@ impl NipartDhcpV4Manager {
         for merged_iface in merged_state
             .ifaces
             .iter()
-            .filter(|i| !i.merged.is_userspace())
+            .filter(|i| !i.merged.is_userspace() && !i.merged.is_ignore())
         {
             // `restart_auto_ip` (the boot hand-off) must restart the DHCP
             // client even for an interface whose kernel state already

@@ -203,6 +203,43 @@ fn live_state_tracks_connected_ifaces_per_interface() {
 }
 
 #[tokio::test]
+async fn apply_ignore_marker_disconnects_managed_phy() {
+    let enabled_flag = Arc::new(AtomicBool::new(true));
+    let wifi_live = Arc::new(Mutex::new(HashMap::new()));
+    let mut state =
+        WifiClientState::new(enabled_flag, wifi_live.clone(), wifi_errors());
+    state.ifaces.insert(
+        "wlan1".to_string(),
+        WifiIfaceState {
+            if_index: 42,
+            desired_networks: vec![network("Home-SSID", None, false)],
+        },
+    );
+    state.set_live_connected(
+        "wlan1",
+        WifiLiveState {
+            ssid: "Home-SSID".to_string(),
+            bssid: None,
+        },
+    );
+
+    state
+        .apply(&[phy_iface("wlan1", InterfaceState::Ignore)], false)
+        .await
+        .expect("a `state: ignore` marker must be accepted");
+
+    assert!(
+        !state.ifaces.contains_key("wlan1"),
+        "an ignored wifi-phy must be dropped from the managed set"
+    );
+    assert!(
+        !state.is_connected(),
+        "the ignored phy's live connection must be cleared"
+    );
+    assert!(wifi_live.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn set_control_off_clears_live_state() {
     let enabled_flag = Arc::new(AtomicBool::new(true));
     let wifi_live = Arc::new(Mutex::new(HashMap::new()));

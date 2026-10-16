@@ -187,18 +187,18 @@ impl MergedInterfaces {
 
         super::wifi::expand_wifi_cfg_to_connected_phy(&mut desired, &current);
 
-        // TODO: Remove ignore interface
         // TODO: Resolve `type: unknown` in desired based on current state
         for mut des_iface in desired.drain() {
-            // TODO: when certain interface been marked as ignore, we should
-            //       also make sure it is ignored all side-changes like
-            //       port check and route changes.
             if des_iface.is_ignore() {
+                // The interface is persisted as unmanaged (`for_save`) but
+                // never applied, verified nor reverted. Side changes such as
+                // route or controller adjustments are filtered separately.
                 log::info!(
-                    "Ignoring interface {} for `state: ignore`",
-                    des_iface.name()
+                    "Interface {}/{} is marked `state: ignore`, persisting it \
+                     without applying any change",
+                    des_iface.name(),
+                    des_iface.iface_type(),
                 );
-                continue;
             }
 
             let mut saved_iface = saved.as_ref().and_then(|s| {

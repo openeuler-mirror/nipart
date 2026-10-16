@@ -169,7 +169,11 @@ impl NipartMonitorManager {
         let cur_state =
             NipartNoDaemon::query_network_state(NipartQueryOption::running())
                 .await?;
-        for iface in saved_state.ifaces.iter().filter(|i| !i.is_absent()) {
+        for iface in saved_state
+            .ifaces
+            .iter()
+            .filter(|i| !i.is_absent() && !i.is_ignore())
+        {
             let base = iface.base_iface();
             if base.auto_connect.as_ref() == Some(&InterfaceAutoConnect::Manual)
             {
@@ -340,7 +344,11 @@ impl NipartMonitorManager {
 }
 
 fn wifi_monitor_is_needed(full_saved_state: &NetworkState) -> bool {
-    for iface in full_saved_state.ifaces.iter().filter(|i| !i.is_absent()) {
+    for iface in full_saved_state
+        .ifaces
+        .iter()
+        .filter(|i| !i.is_absent() && !i.is_ignore())
+    {
         if let Interface::WifiCfg(wifi_iface) = iface
             && wifi_iface.ssid().is_some()
         {

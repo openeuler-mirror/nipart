@@ -471,6 +471,7 @@ fn gen_wifi_off_purge_state(cur_state: &NetworkState) -> NetworkState {
     for iface in cur_state.ifaces.kernel_ifaces.values().filter(|iface| {
         iface.iface_type() == &InterfaceType::WifiPhy
             && iface.base_iface().state.is_up()
+            && !iface.is_ignore()
     }) {
         let mut base = BaseInterface::new(
             iface.kernel_iface_name().to_string(),
@@ -503,7 +504,10 @@ fn gen_non_nic_state(
         // `wifi-cfg` profiles are userspace-only and need a wifi-phy to bind
         // to: the event worker hands them to the wifi plugin when a phy
         // appears, so boot must not apply them here.
-        if iface.is_virtual() && iface.iface_type() != &InterfaceType::WifiCfg {
+        if iface.is_virtual()
+            && iface.iface_type() != &InterfaceType::WifiCfg
+            && !iface.is_ignore()
+        {
             ret.ifaces.push(iface.clone());
         }
     }
@@ -562,6 +566,7 @@ fn gen_creatable_virtual_names(
         for iface in saved_state.ifaces.iter().filter(|i| {
             i.is_virtual()
                 && !i.is_absent()
+                && !i.is_ignore()
                 && i.iface_type() != &InterfaceType::WifiCfg
         }) {
             let names = virtual_iface_identity_names(iface);
