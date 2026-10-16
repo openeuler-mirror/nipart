@@ -91,6 +91,17 @@ pub struct NipartApplyOption {
     /// is not modified unless `memory_only` is false.
     #[serde(default)]
     pub force: bool,
+    /// Do not wait for the WIFI associations the apply asks for. Default
+    /// to false.
+    ///
+    /// An explicit disconnect (`npt down`) hands the remaining saved
+    /// profiles to the plugin with the target profile disabled: the
+    /// plugin reconnects to the best remaining network by itself, but the
+    /// command must not block until that re-association finished (the
+    /// reconnect may need a full scan taking tens of seconds). The
+    /// disconnect itself is still awaited outside of the apply.
+    #[serde(default)]
+    pub no_wifi_connect_wait: bool,
 }
 
 impl NipartApplyOption {
@@ -120,6 +131,11 @@ impl NipartApplyOption {
 
     pub fn force(mut self) -> Self {
         self.force = true;
+        self
+    }
+
+    pub fn no_wifi_connect_wait(mut self) -> Self {
+        self.no_wifi_connect_wait = true;
         self
     }
 }

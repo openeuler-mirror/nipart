@@ -2,13 +2,14 @@
 
 use nipart::{
     Interface, InterfaceAutoConnect, InterfaceType, MergedNetworkState,
-    NetworkState, NipartInterface,
+    NetworkState, NipartApplyOption, NipartInterface,
 };
 
 use super::{
     WifiConnectGroup, WifiConnectRequest, pretend_config_is_saved,
-    saved_wifi_restore_state, wifi_connect_groups, wifi_connect_requests,
-    wifi_group_connected_elsewhere, wifi_group_is_connected, wifi_phy_names,
+    saved_wifi_restore_state, should_wait_wifi_connect, wifi_connect_groups,
+    wifi_connect_requests, wifi_group_connected_elsewhere,
+    wifi_group_is_connected, wifi_phy_names,
 };
 
 const IFACE_YAML: &str = r#"---
@@ -287,6 +288,30 @@ fn test_wifi_connect_requests_cover_phy_and_cfg_ssids() {
             },
         ]
     );
+}
+
+/// `npt down` hands the remaining saved profiles to the plugin with the
+/// target disabled. The plugin reconnects to the best remaining network by
+/// itself, but the command must not block until that re-association
+/// finished (it may need a full scan): `no_wifi_connect_wait` keeps the
+/// generic verification while skipping the association wait. `no_verify`
+/// keeps skipping everything.
+#[test]
+fn test_wifi_connect_wait_skipped_for_down_and_no_verify() {
+    assert!(should_wait_wifi_connect(&NipartApplyOption::new()));
+    assert!(should_wait_wifi_connect(&NipartApplyOption::new().force()));
+    assert!(!should_wait_wifi_connect(
+        &NipartApplyOption::new().no_wifi_connect_wait()
+    ));
+    assert!(!should_wait_wifi_connect(
+        &NipartApplyOption::new().no_verify()
+    ));
+    assert!(!should_wait_wifi_connect(
+        &NipartApplyOption::new()
+            .memory_only()
+            .force()
+            .no_wifi_connect_wait()
+    ));
 }
 
 /// Only the plugin's live connection state may satisfy a connect request:

@@ -135,6 +135,16 @@ fn wifi_connect_requests(
     ret
 }
 
+/// Whether an apply waits for the WIFI associations it requests.
+///
+/// `no_verify` applies skip the wait together with the rest of the
+/// verification; `no_wifi_connect_wait` skips only the association wait
+/// (e.g. `npt down`, where the remaining saved profiles are kept eligible
+/// but their re-association must not block the command).
+fn should_wait_wifi_connect(option: &NipartApplyOption) -> bool {
+    !option.no_verify && !option.no_wifi_connect_wait
+}
+
 /// Group the connect requests by the wifi-phy they target.
 ///
 /// An unbound request (no `base-iface`) is handed to every present
@@ -679,7 +689,12 @@ impl NipartCommander {
         // saved config), so a wrong password would otherwise surface only
         // as a background retry loop while the apply reports success. A
         // failure here triggers the normal rollback.
-        if !merged_state.option.no_verify {
+        //
+        // A disconnect action (`no_wifi_connect_wait`, e.g. `npt down`)
+        // only waits for the target to disappear, not for the plugin's
+        // re-association to a remaining profile: the reconnect can need a
+        // full scan and must not block the command.
+        if should_wait_wifi_connect(&merged_state.option) {
             self.wait_wifi_connect_requests(
                 conn.as_deref_mut(),
                 &wifi_connect_requests(merged_state),
