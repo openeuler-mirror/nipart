@@ -9,6 +9,7 @@ mod ethernet;
 mod inter_ifaces;
 mod linux_bridge;
 mod loopback;
+mod macsec;
 mod ovs_bridge;
 mod ovs_iface;
 mod unknown;
@@ -38,6 +39,7 @@ pub use self::{
         LinuxBridgePortConfig, LinuxBridgeStpOptions,
     },
     loopback::LoopbackInterface,
+    macsec::{MacSecConfig, MacSecInterface, MacSecOffload, MacSecValidate},
     ovs_bridge::{OvsBridgeConfig, OvsBridgeInterface, OvsBridgePortConfig},
     ovs_iface::OvsInterface,
     unknown::UnknownInterface,

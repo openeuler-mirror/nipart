@@ -76,16 +76,16 @@ fn latched_connect_error_matches_iface_and_ssid() {
 
 #[test]
 fn fatal_shuli_errors_are_mapped_for_the_daemon_wait() {
-    use shuli::ErrorKind as ShuliErrorKind;
+    use shuli_wifi::ErrorKind as ShuliErrorKind;
 
-    let err = nipart_error_from_shuli(&shuli::WifiError::new(
+    let err = nipart_error_from_shuli(&shuli_wifi::WifiError::new(
         ShuliErrorKind::WrongPassword,
         "wrong password for SSID 'Test-WIFI'",
     ))
     .expect("a wrong password must be latched");
     assert_eq!(err.kind(), ErrorKind::AuthenticationError);
 
-    let err = nipart_error_from_shuli(&shuli::WifiError::new(
+    let err = nipart_error_from_shuli(&shuli_wifi::WifiError::new(
         ShuliErrorKind::NoSupport,
         "TKIP WPA2 is not supported",
     ))
@@ -93,7 +93,7 @@ fn fatal_shuli_errors_are_mapped_for_the_daemon_wait() {
     assert_eq!(err.kind(), ErrorKind::NoSupport);
 
     assert!(
-        nipart_error_from_shuli(&shuli::WifiError::new(
+        nipart_error_from_shuli(&shuli_wifi::WifiError::new(
             ShuliErrorKind::Nl80211,
             "transient netlink error",
         ))

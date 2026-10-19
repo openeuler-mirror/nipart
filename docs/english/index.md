@@ -66,6 +66,7 @@ interfaces:
 * [Wait Online](features/wait-online.md)
 * [Vlan](features/vlan.md)
 * [VxLAN](features/vxlan.md)
+* [MACsec](features/macsec.md)
 * [Bond](features/bond.md)
 * [Linux Bridge](features/bridge.md)
 * [OpenvSwitch Bridge](features/ovs.md)

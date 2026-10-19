@@ -18,7 +18,9 @@
 - Restart DHCPv6 service upon link local address changes
 - Support filtering full network query to a single interface
 - OVS bridge
-- MacSec
+- Move MACsec query/apply support to nispor: add `MacSecConf` and apply
+  support there, then drop the rtnetlink implementation and SCI-based
+  port decoding in `src/lib/no_daemon/macsec.rs`.
 - HSR
 - MacVlan
 - Infiniband

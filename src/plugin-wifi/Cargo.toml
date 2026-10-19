@@ -18,7 +18,7 @@ serde_json = { workspace = true }
 rmsd_yaml = { workspace = true }
 rtnetlink = { workspace = true }
 wl-nl80211 = { workspace = true }
-shuli = { workspace = true }
+shuli-wifi = { workspace = true }
 nipart = { path = "../lib" }
 
 [[bin]]

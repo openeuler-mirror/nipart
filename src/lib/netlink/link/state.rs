@@ -12,9 +12,9 @@ use super::{
 use crate::{
     BondPortConfig, BridgeVlanConfig, DummyInterface, EthernetConfig,
     EthernetInterface, Interface, InterfaceType, LinuxBridgeInterface,
-    LinuxBridgePortConfig, LoopbackInterface, OvsInterface, UnknownInterface,
-    VethConfig, VlanInterface, VrfInterface, VxlanInterface, WifiConfig,
-    WifiPhyInterface, WireguardConfig, WireguardInterface,
+    LinuxBridgePortConfig, LoopbackInterface, MacSecInterface, OvsInterface,
+    UnknownInterface, VethConfig, VlanInterface, VrfInterface, VxlanInterface,
+    WifiConfig, WifiPhyInterface, WireguardConfig, WireguardInterface,
 };
 
 #[derive(Debug, Default)]
@@ -135,6 +135,13 @@ impl LinkState {
                     iface.vxlan_base_index,
                     vxlan.base_iface.as_deref(),
                 ));
+            }
+            if let Some(macsec) = iface.macsec.as_mut() {
+                macsec.base_iface = resolve_base_index(
+                    index_map,
+                    iface.macsec_base_index,
+                    Some(macsec.base_iface.as_str()),
+                );
             }
             let primary_index = iface.bond_primary_index;
             if let Some(primary_index) = primary_index
@@ -309,6 +316,7 @@ impl LinkIface {
             bridge,
             ethernet,
             wireguard,
+            macsec,
             wifi,
             is_wifi,
             ..
@@ -353,6 +361,9 @@ impl LinkIface {
                     base,
                     wireguard,
                 }))
+            }
+            InterfaceType::MacSec => {
+                Interface::MacSec(Box::new(MacSecInterface { base, macsec }))
             }
             InterfaceType::WifiPhy => {
                 Interface::WifiPhy(Box::new(WifiPhyInterface { base, wifi }))

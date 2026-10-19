@@ -148,6 +148,7 @@ impl InterfaceType {
                 | InterfaceType::WifiPhy
                 | InterfaceType::Bond
                 | InterfaceType::Wireguard
+                | InterfaceType::MacSec
         )
     }
 

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use super::ip::apply_iface_ip_changes;
 use crate::{
-    ErrorKind, Interface, MergedInterface, MergedInterfaces, NipartError,
-    NipartInterface, NipartNoDaemon,
+    ErrorKind, Interface, InterfaceType, MergedInterface, MergedInterfaces,
+    NipartError, NipartInterface, NipartNoDaemon,
     netlink::{
         link::apply::{
             apply_bond_port_configs, apply_bridge_port_configs,
@@ -196,10 +196,39 @@ async fn apply_ifaces_link_changes(
             continue;
         }
 
+        // New MACsec interfaces are created after this batch so their base
+        // interface exists.
+        if apply_iface.iface_type() == &InterfaceType::MacSec
+            && merged_iface.current.is_none()
+        {
+            continue;
+        }
+
         apply_iface_link_changes(
             &handle,
             apply_iface,
             merged_iface.current.as_ref(),
+            &existing_iface_names,
+        )
+        .await?;
+    }
+
+    // Create the new MACsec interfaces now that every other link of this
+    // apply (e.g. their base interface) exists.
+    for merged_iface in sorted_changed_mergd_ifaces.iter() {
+        let Some(apply_iface) = merged_iface.for_apply.as_ref() else {
+            continue;
+        };
+        if apply_iface.iface_type() != &InterfaceType::MacSec
+            || merged_iface.current.is_some()
+            || apply_iface.iface_type().is_userspace()
+        {
+            continue;
+        }
+        apply_iface_link_changes(
+            &handle,
+            apply_iface,
+            None,
             &existing_iface_names,
         )
         .await?;

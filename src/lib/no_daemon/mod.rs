@@ -34,6 +34,7 @@ impl NipartNoDaemon {
             InterfaceType::Vxlan,
             InterfaceType::WifiPhy,
             InterfaceType::Wireguard,
+            InterfaceType::MacSec,
         ])
     }
 }

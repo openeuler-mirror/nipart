@@ -13,6 +13,7 @@ use super::{
     LinkIndexMap,
     bond::parse_bond,
     bridge::{self, BridgeVlanEntry, parse_bridge},
+    macsec::parse_macsec,
     vlan::parse_vlan,
     vrf::parse_vrf,
     vxlan::parse_vxlan,
@@ -20,8 +21,8 @@ use super::{
 use crate::{
     BaseInterface, BondConfig, BondPortConfig, EthernetConfig,
     InterfaceLinkState, InterfaceState, InterfaceType, LinuxBridgeConfig,
-    LinuxBridgePortConfig, VethConfig, VlanConfig, VrfConfig, VxlanConfig,
-    WifiConfig, WireguardConfig,
+    LinuxBridgePortConfig, MacSecConfig, VethConfig, VlanConfig, VrfConfig,
+    VxlanConfig, WifiConfig, WireguardConfig,
     netlink::{mac::format_mac_address, sysfs},
 };
 
@@ -38,6 +39,7 @@ pub(crate) struct LinkIface {
     pub(crate) bridge_port: Option<LinuxBridgePortConfig>,
     pub(crate) ethernet: Option<EthernetConfig>,
     pub(crate) wireguard: Option<WireguardConfig>,
+    pub(crate) macsec: Option<MacSecConfig>,
     pub(crate) wifi: Option<WifiConfig>,
     pub(crate) is_wifi: bool,
     pub(crate) bond_port_perm_mac: Option<String>,
@@ -46,6 +48,7 @@ pub(crate) struct LinkIface {
     pub(crate) veth_peer_index: Option<u32>,
     pub(crate) vlan_base_index: Option<u32>,
     pub(crate) vxlan_base_index: Option<u32>,
+    pub(crate) macsec_base_index: Option<u32>,
     pub(crate) link_netnsid: Option<i32>,
     pub(crate) bridge_filtering: Option<bool>,
     pub(crate) bridge_default_pvid: Option<u16>,
@@ -166,6 +169,7 @@ pub(crate) fn parse_link(
                 InterfaceType::Veth => ret.veth_peer_index = Some(*index),
                 InterfaceType::Vlan => ret.vlan_base_index = Some(*index),
                 InterfaceType::Vxlan => ret.vxlan_base_index = Some(*index),
+                InterfaceType::MacSec => ret.macsec_base_index = Some(*index),
                 _ => (),
             },
             LinkAttribute::LinkNetNsId(id) => ret.link_netnsid = Some(*id),
@@ -229,6 +233,9 @@ pub(crate) fn parse_link(
             }
             InterfaceType::Vxlan => {
                 ret.vxlan = parse_vxlan(data);
+            }
+            InterfaceType::MacSec => {
+                ret.macsec = parse_macsec(data);
             }
             InterfaceType::Bond => {
                 if let Some((config, primary_index)) = parse_bond(data) {

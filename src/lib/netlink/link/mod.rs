@@ -14,6 +14,7 @@ pub(crate) mod apply;
 pub(crate) mod bond;
 pub(crate) mod bridge;
 pub(crate) mod ethtool;
+pub(crate) mod macsec;
 pub(crate) mod parse;
 pub(crate) mod state;
 pub(crate) mod vlan;

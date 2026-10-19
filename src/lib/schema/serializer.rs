@@ -29,3 +29,19 @@ where
         serializer.serialize_none()
     }
 }
+
+/// Serialize an optional 64-bit value as a 16-character hexadecimal string,
+/// matching the SCI format printed by `ip`.
+pub(crate) fn option_u64_as_hex<S>(
+    data: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if let Some(v) = data {
+        serializer.serialize_str(format!("{v:016x}").as_str())
+    } else {
+        serializer.serialize_none()
+    }
+}

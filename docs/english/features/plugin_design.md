@@ -24,6 +24,7 @@ upgraded independently.
 Currently, Nipart ships with the following plugins:
 
 - **nipart-plugin-wifi**: Manages WiFi connections via wpa_supplicant
+- **nipart-plugin-8021x**: Manages MACsec MKA key agreement via shuli-wired
 - **nipart-plugin-ovs**: Manages Open vSwitch bridges and ports
 
 A `nipart-plugin-demo` is also provided as a reference implementation.
@@ -154,6 +155,7 @@ When the daemon shuts down:
 Plugin binaries follow the naming convention `nipart-plugin-<name>`:
 
 - `nipart-plugin-wifi`
+- `nipart-plugin-8021x`
 - `nipart-plugin-ovs`
 - `nipart-plugin-demo` (ignored by the daemon in normal operation)
 
