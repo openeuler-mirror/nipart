@@ -7,7 +7,7 @@ use super::super::{
     value::copy_undefined_value,
 };
 use crate::{
-    BaseInterface, ErrorKind, InterfaceType, JsonDisplay,
+    BaseInterface, DebugHideSecrets, ErrorKind, InterfaceType, JsonDisplay,
     JsonDisplayHideSecrets, NipartError, NipartInterface,
 };
 
@@ -445,6 +445,7 @@ impl NipartInterface for WifiCfgInterface {
     Serialize,
     Deserialize,
     Default,
+    DebugHideSecrets,
     JsonDisplayHideSecrets,
 )]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -569,72 +570,6 @@ impl WifiConfig {
     pub(crate) fn post_merge(&mut self, old: &Self) {
         if self.ssid.is_empty() {
             self.ssid = old.ssid.to_string();
-        }
-    }
-}
-
-impl std::fmt::Debug for WifiConfig {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        write!(f, "{:?}", WifiConfigHideSecrets::from(self))
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct WifiConfigHideSecrets {
-    state: Option<WifiState>,
-    generation: Option<u32>,
-    ssid: String,
-    bssid: Option<String>,
-    password: Option<String>,
-    hidden: bool,
-    auth_type: Option<WifiAuthType>,
-    base_iface: Option<String>,
-    frequency_mhz: Option<u32>,
-    rx_bitrate_mb: Option<u32>,
-    tx_bitrate_mb: Option<u32>,
-    signal_dbm: Option<i16>,
-    signal_percent: Option<u8>,
-}
-
-impl From<&WifiConfig> for WifiConfigHideSecrets {
-    fn from(v: &WifiConfig) -> Self {
-        let WifiConfig {
-            ssid,
-            bssid,
-            password,
-            hidden,
-            auth_type,
-            base_iface,
-            state,
-            generation,
-            frequency_mhz,
-            rx_bitrate_mb,
-            tx_bitrate_mb,
-            signal_dbm,
-            signal_percent,
-        } = v.clone();
-        Self {
-            password: if password.is_some() {
-                Some(crate::NetworkState::HIDE_SECRET_STR.to_string())
-            } else {
-                None
-            },
-            ssid,
-            bssid,
-            hidden,
-            base_iface,
-            auth_type,
-            state,
-            generation,
-            frequency_mhz,
-            rx_bitrate_mb,
-            tx_bitrate_mb,
-            signal_dbm,
-            signal_percent,
         }
     }
 }

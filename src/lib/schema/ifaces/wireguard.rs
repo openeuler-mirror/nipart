@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BaseInterface, ErrorKind, InterfaceType, JsonDisplay,
+    BaseInterface, DebugHideSecrets, ErrorKind, InterfaceType, JsonDisplay,
     JsonDisplayHideSecrets, NipartError, NipartInterface,
 };
 
@@ -122,6 +122,7 @@ impl NipartInterface for WireguardInterface {
     Default,
     Serialize,
     Deserialize,
+    DebugHideSecrets,
     JsonDisplayHideSecrets,
 )]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -209,31 +210,6 @@ impl WireguardConfig {
     }
 }
 
-// TODO: The more elegant way of hide secret during debug is using Derive like
-// `#[serde(skip)]`. But that is way too complex without using deprecated quote
-// crate. Let's do the silly non-rust-idiom way for now.
-impl std::fmt::Debug for WireguardConfig {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        f.debug_struct("WireguardConfig")
-            .field("public_key", &self.public_key)
-            .field(
-                "private_key",
-                if self.private_key.is_some() {
-                    &Some(crate::NetworkState::HIDE_SECRET_STR)
-                } else {
-                    &None::<&str>
-                },
-            )
-            .field("listen_port", &self.listen_port)
-            .field("fwmark", &self.fwmark)
-            .field("peers", &self.peers)
-            .finish()
-    }
-}
-
 #[derive(
     Clone,
     PartialEq,
@@ -241,6 +217,7 @@ impl std::fmt::Debug for WireguardConfig {
     Default,
     Serialize,
     Deserialize,
+    DebugHideSecrets,
     JsonDisplayHideSecrets,
 )]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -323,34 +300,6 @@ impl WireguardPeerConfig {
         }
 
         Ok(())
-    }
-}
-
-// TODO: The more elegant way of hide secret during debug is using Derive like
-// `#[serde(skip)]`. But that is way too complex without using deprecated quote
-// crate. Let's do the silly non-rust-idiom way for now.
-impl std::fmt::Debug for WireguardPeerConfig {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        f.debug_struct("WireguardPeerConf")
-            .field("endpoint", &self.endpoint)
-            .field("public_key", &self.public_key)
-            .field(
-                "preshared_key",
-                &self
-                    .preshared_key
-                    .as_ref()
-                    .map(|_| crate::NetworkState::HIDE_SECRET_STR),
-            )
-            .field("last_handshake", &self.last_handshake)
-            .field("rx_bytes", &self.rx_bytes)
-            .field("tx_bytes", &self.tx_bytes)
-            .field("persistent_keepalive", &self.persistent_keepalive)
-            .field("allowed_ips", &self.allowed_ips)
-            .field("protocol_version", &self.protocol_version)
-            .finish()
     }
 }
 
