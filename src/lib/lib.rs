@@ -10,7 +10,9 @@ mod plugin;
 mod schema;
 mod uuid;
 
-pub use nipart_derive::{JsonDisplay, JsonDisplayHideSecrets};
+pub use nipart_derive::{
+    DebugHideSecrets, JsonDisplay, JsonDisplayHideSecrets,
+};
 
 pub use self::{
     client::{NipartClient, NipartClientCmd},
