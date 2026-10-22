@@ -139,6 +139,7 @@ fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
         } else {
             None
         },
+        protocol: Some(np_route.protocol),
         ..Default::default()
     };
     if np_route.address_family == nispor::AddressFamily::Ipv6 {
@@ -231,6 +232,7 @@ fn np_route_to_nipart(np_route: &nispor::Route) -> RouteEntry {
         } else {
             None
         },
+        protocol: Some(np_route.protocol),
         ..Default::default()
     }
 }
@@ -271,6 +273,7 @@ fn nipart_to_nispor_route_conf(
     ret.via.clone_from(&nipart_rt.next_hop_addr);
     ret.metric = nipart_rt.metric.and_then(|m| u32::try_from(m).ok());
     ret.onlink = nipart_rt.onlink.unwrap_or_default();
+    ret.protocol = nipart_rt.protocol;
     if let Some(table_id) = nipart_rt.table_id {
         if table_id > u8::MAX.into() {
             return Err(NipartError::new(
