@@ -308,10 +308,12 @@ fn gen_state_for_down(
     } else {
         InterfaceState::Down
     };
-    // Explicitly disable the IP stack so routes are purged and the running
-    // addresses are removed together with the link state change.
+    // Explicitly purge the IP stack so routes are removed together with the
+    // link state change. IPv6 stays enabled so the kernel-generated
+    // link-local address survives.
     new_iface.base_iface_mut().ipv4 = Some(InterfaceIpv4::new_disabled());
-    new_iface.base_iface_mut().ipv6 = Some(InterfaceIpv6::new_disabled());
+    new_iface.base_iface_mut().ipv6 =
+        Some(InterfaceIpv6::new_purge_keep_link_local());
     state.ifaces.push(new_iface);
 
     let routes = gen_routes_for_iface_down(saved_iface, saved_state);
@@ -335,7 +337,8 @@ fn gen_state_for_down_current_only(cur_iface: &Interface) -> NetworkState {
         InterfaceState::Down
     };
     new_iface.base_iface_mut().ipv4 = Some(InterfaceIpv4::new_disabled());
-    new_iface.base_iface_mut().ipv6 = Some(InterfaceIpv6::new_disabled());
+    new_iface.base_iface_mut().ipv6 =
+        Some(InterfaceIpv6::new_purge_keep_link_local());
     state.ifaces.push(new_iface);
     state
 }

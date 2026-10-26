@@ -344,17 +344,41 @@ impl NipartEventWorker {
                 }
             }
 
-            if let Some(purge_iface) = gen_wifi_phy_ip_purge(
+            let wifi_phy_purge = gen_wifi_phy_ip_purge(
                 &event,
                 cur_iface,
                 auto_connect_covers_ip_purge,
-            ) {
+            );
+            let purge_wifi_phy = wifi_phy_purge.is_some();
+            if let Some(purge_iface) = wifi_phy_purge {
                 log::trace!(
                     "{}: link down on wifi-phy, purging IP stack: \
                      {purge_iface}",
                     event.iface_name
                 );
                 desired_state.ifaces.push(purge_iface);
+            }
+            // A WiFi link-down purge must also remove the running routes of
+            // the previous connection (e.g. the IPv6 default gateway learned
+            // from RA), not only the saved static routes.
+            if event.iface_type == InterfaceType::WifiPhy
+                && !event.is_up
+                && (purge_wifi_phy || auto_connect_covers_ip_purge)
+            {
+                let running_routes =
+                    gen_running_route_purge(&event.iface_name, &cur_state);
+                if !running_routes.is_empty() {
+                    log::trace!(
+                        "{}: link down on wifi-phy, purging running routes: \
+                         {running_routes:?}",
+                        event.iface_name
+                    );
+                    desired_state
+                        .routes
+                        .config
+                        .get_or_insert_default()
+                        .extend(running_routes);
+                }
             }
 
             // The event may be the first time the kernel interface exists:
@@ -847,7 +871,15 @@ fn gen_desired_iface_down(
     }
     new_iface.base_iface_mut().auto_connect = None;
     new_iface.base_iface_mut().ipv4 = Some(InterfaceIpv4::new_disabled());
-    new_iface.base_iface_mut().ipv6 = Some(InterfaceIpv6::new_disabled());
+    // A WiFi link-down purge keeps IPv6 enabled so the kernel-generated
+    // link-local address survives; only the addresses and routes learned
+    // from the previous connection are removed.
+    new_iface.base_iface_mut().ipv6 =
+        Some(if saved_iface.iface_type() == &InterfaceType::WifiPhy {
+            InterfaceIpv6::new_purge_keep_link_local()
+        } else {
+            InterfaceIpv6::new_disabled()
+        });
     // A link-down purge must not carry the saved SSID back to the wifi
     // plugin: the plugin would treat it as an explicit wifi up request and
     // re-enable WIFI while `npt wifi off` is in effect.
@@ -1024,10 +1056,33 @@ fn gen_wifi_phy_ip_purge(
         // WIFI PHY interface removed.
         InterfaceState::Absent
     };
-    // Purge IP
+    // Purge IP. IPv6 stays enabled so the kernel-generated link-local
+    // address is kept; only the addresses learned from the previous
+    // connection are removed.
     desired_iface.ipv4 = Some(InterfaceIpv4::new_disabled());
-    desired_iface.ipv6 = Some(InterfaceIpv6::new_disabled());
+    desired_iface.ipv6 = Some(InterfaceIpv6::new_purge_keep_link_local());
     Some(desired_iface.into())
+}
+
+/// Build absent route entries for every running route egressing through
+/// `iface_name`, so a WiFi link-down purge also removes routes learned from
+/// the previous connection (e.g. the IPv6 default gateway from RA).
+fn gen_running_route_purge(
+    iface_name: &str,
+    cur_state: &NetworkState,
+) -> Vec<RouteEntry> {
+    cur_state
+        .routes
+        .running
+        .iter()
+        .flatten()
+        .filter(|rt| rt.next_hop_iface.as_deref() == Some(iface_name))
+        .cloned()
+        .map(|mut rt| {
+            rt.state = Some(RouteState::Absent);
+            rt
+        })
+        .collect()
 }
 
 fn handle_wifi_phy_event(

@@ -33,7 +33,7 @@ futures-channel = "0.3.11"
 rand = "0.10"
 clap = { version = "4.5", features = [ "cargo"] }
 wl-nl80211 = "0.8.0"
-shuli = { git = "https://github.com/cathay4t/shuli.git" }
+shuli = { package = "shuli-wifi", git = "https://github.com/cathay4t/shuli.git" }
 syn = { version = "3.0", default-features = false, features = [ "derive" ] }
 quote = "1.0"
 

@@ -51,6 +51,53 @@ fn test_desired_route_matching_running_kernel_route_not_changed() {
 }
 
 #[test]
+fn test_absent_route_matching_running_kernel_route_is_deleted() {
+    let des_ifaces: Interfaces = rmsd_yaml::from_str(
+        r#"
+    - name: wlan0
+      type: wifi-phy
+      state: up
+    "#,
+    )
+    .unwrap();
+    let merged_ifaces =
+        MergedInterfaces::new(des_ifaces, Interfaces::default(), None).unwrap();
+
+    let des_routes: Routes = rmsd_yaml::from_str(
+        r#"---
+        config:
+          - destination: ::/0
+            next-hop-interface: wlan0
+            state: absent
+        "#,
+    )
+    .unwrap();
+    let mut current_route = RouteEntry {
+        destination: Some("::/0".to_string()),
+        next_hop_iface: Some("wlan0".to_string()),
+        next_hop_addr: Some("fe80::1".to_string()),
+        metric: Some(1024),
+        protocol: Some(nispor::RouteProtocol::Ra),
+        ..Default::default()
+    };
+    current_route.table_id = Some(254);
+    let cur_routes = Routes {
+        running: Some(vec![current_route]),
+        ..Default::default()
+    };
+
+    let merged_routes =
+        MergedRoutes::new(des_routes, cur_routes, None, &merged_ifaces)
+            .unwrap();
+
+    assert_eq!(merged_routes.changed_routes.len(), 1);
+    let changed = &merged_routes.changed_routes[0];
+    assert!(changed.is_absent());
+    assert_eq!(changed.destination.as_deref(), Some("::/0"));
+    assert_eq!(changed.protocol, Some(nispor::RouteProtocol::Ra));
+}
+
+#[test]
 fn test_saved_route_not_applied_but_persisted() {
     let des_ifaces: Interfaces = rmsd_yaml::from_str(
         r#"

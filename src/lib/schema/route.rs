@@ -393,6 +393,10 @@ pub struct RouteEntry {
     /// Store the routes to the route table the specified VRF bind to.
     /// The `table-id` will be resolved from the VRF interface with this name.
     pub vrf_name: Option<String>,
+    #[serde(skip)]
+    /// Kernel protocol of a queried running route. Used when building the
+    /// matching delete request (e.g. `ra`); not part of the YAML schema.
+    pub(crate) protocol: Option<nispor::RouteProtocol>,
 }
 
 #[derive(
@@ -538,6 +542,7 @@ impl RouteEntry {
                     .unwrap_or_default()
                     .into(),
                 self.advmss.unwrap_or_default(),
+                route_protocol_sort_key(self.protocol),
             ],
         )
     }
@@ -631,6 +636,35 @@ impl RouteEntry {
     pub(crate) fn is_unicast(&self) -> bool {
         self.route_type.is_none()
             || u8::from(self.route_type.unwrap()) == RTN_UNICAST
+    }
+}
+
+fn route_protocol_sort_key(protocol: Option<nispor::RouteProtocol>) -> u32 {
+    match protocol {
+        None | Some(nispor::RouteProtocol::Unspec) => 0,
+        Some(nispor::RouteProtocol::Other(value)) => u32::from(value),
+        Some(nispor::RouteProtocol::IcmpRedirect) => 1,
+        Some(nispor::RouteProtocol::Kernel) => 2,
+        Some(nispor::RouteProtocol::Boot) => 3,
+        Some(nispor::RouteProtocol::Static) => 4,
+        Some(nispor::RouteProtocol::Gated) => 8,
+        Some(nispor::RouteProtocol::Mrt) => 10,
+        Some(nispor::RouteProtocol::Zebra) => 11,
+        Some(nispor::RouteProtocol::Bird) => 12,
+        Some(nispor::RouteProtocol::DnRouted) => 13,
+        Some(nispor::RouteProtocol::Xorp) => 14,
+        Some(nispor::RouteProtocol::Ntk) => 15,
+        Some(nispor::RouteProtocol::Dhcp) => 16,
+        Some(nispor::RouteProtocol::Mrouted) => 17,
+        Some(nispor::RouteProtocol::KeepAlived) => 18,
+        Some(nispor::RouteProtocol::Ra) => 24,
+        Some(nispor::RouteProtocol::Babel) => 42,
+        Some(nispor::RouteProtocol::Bgp) => 186,
+        Some(nispor::RouteProtocol::Isis) => 187,
+        Some(nispor::RouteProtocol::Ospf) => 188,
+        Some(nispor::RouteProtocol::Rip) => 189,
+        Some(nispor::RouteProtocol::Eigrp) => 192,
+        Some(_) => 0,
     }
 }
 

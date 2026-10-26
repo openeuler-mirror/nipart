@@ -133,6 +133,18 @@ impl MergedRoutes {
             }
         }
 
+        // Every changed (including absent) route must also mark its next hop
+        // interface as changed, otherwise `apply_routes()` skips an apply
+        // whose only change is a route deletion (e.g. a running RA route on
+        // an interface whose IP stack was disabled).
+        for rt in &changed_routes {
+            if let Some(via) = rt.next_hop_iface.as_ref() {
+                changed_ifaces.insert(via.as_str());
+            } else if rt.route_type.is_some() {
+                changed_ifaces.insert(LOOPBACK_IFACE_NAME);
+            }
+        }
+
         let merged = group_by_next_hop_iface(merged_routes);
 
         let route_changed_ifaces: Vec<String> =
@@ -736,6 +748,38 @@ fn build_merged_and_changed_routes(
                     merged_routes.push(rt.clone());
                 }
             }
+        }
+    }
+
+    // Dynamic routes (e.g. the IPv6 default gateway learned from RA) only
+    // appear in `running`. An absent desired route matching them, or an
+    // interface whose IP stack is being disabled, must still delete them.
+    // Non-absent running routes are not merged: they are not part of the
+    // persisted configuration.
+    for rt in current.running.iter().flatten() {
+        let Some(via) = rt.next_hop_iface.as_ref() else {
+            continue;
+        };
+        if iface_lists.will_delete.contains(&via.as_str())
+            || iface_lists.absent.contains(&via.as_str())
+        {
+            continue;
+        }
+        let via_ip_disabled =
+            iface_lists.desired_ifaces.contains(&via.as_str())
+                && ((rt.is_ipv6()
+                    && iface_lists.ipv6_disabled.contains(&via.as_str()))
+                    || (!rt.is_ipv6()
+                        && iface_lists.ipv4_disabled.contains(&via.as_str())));
+        if via_ip_disabled
+            || desired_routes
+                .iter()
+                .filter(|r| r.is_absent())
+                .any(|absent_rt| absent_rt.is_match(rt))
+        {
+            let mut new_rt = rt.clone();
+            new_rt.state = Some(RouteState::Absent);
+            changed_routes.insert(new_rt);
         }
     }
 

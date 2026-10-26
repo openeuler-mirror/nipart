@@ -139,6 +139,31 @@ fn test_down_virtual_uses_absent_and_nonvirtual_uses_down() {
 }
 
 #[test]
+fn test_down_preserves_ipv6_link_local_address() {
+    let state: NetworkState = rmsd_yaml::from_str(
+        r#"---
+            interfaces:
+              - name: wlan0
+                type: wifi-phy
+                state: up
+            "#,
+    )
+    .unwrap();
+    let wlan0 = find_saved_iface(&state, "wlan0").unwrap();
+
+    for desired in [
+        gen_state_for_down(wlan0, &state),
+        gen_state_for_down_current_only(wlan0),
+    ] {
+        let iface = desired.ifaces.iter().next().unwrap();
+        assert_eq!(
+            iface.base_iface().ipv6,
+            Some(InterfaceIpv6::new_purge_keep_link_local())
+        );
+    }
+}
+
+#[test]
 fn test_down_marks_matching_route_rules_absent() {
     let state: NetworkState = rmsd_yaml::from_str(
         r#"---

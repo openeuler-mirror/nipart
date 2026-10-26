@@ -391,6 +391,19 @@ impl InterfaceIpv6 {
         }
     }
 
+    /// New [InterfaceIpv6] which removes every configured/dynamic address
+    /// while keeping the IPv6 stack enabled, so the kernel-generated
+    /// link-local address survives. Used by the WiFi link-down purge.
+    pub fn new_purge_keep_link_local() -> Self {
+        Self {
+            enabled: Some(true),
+            dhcp: Some(false),
+            dhcp_state: None,
+            autoconf: Some(false),
+            addresses: Some(Vec::new()),
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled != Some(false)
     }

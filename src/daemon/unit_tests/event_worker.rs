@@ -5,16 +5,16 @@ use std::time::SystemTime;
 use nipart::{
     Interface, InterfaceAutoConnect, InterfaceIpv4, InterfaceIpv6,
     InterfaceLinkEvent, InterfaceState, InterfaceType, MergedNetworkState,
-    NetworkState, NipartInterface,
+    NetworkState, NipartInterface, RouteEntry,
 };
 
 use super::{
     auto_connect_targets_event_nic, gen_desired_iface_down,
     gen_missing_virtual_dependents, gen_routes_for_iface_up,
-    gen_routes_for_wifi_cfg_up, gen_wifi_cfg_for_new_phy,
-    gen_wifi_phy_ip_purge, handle_event_auto_connect, handle_wifi_phy_event,
-    is_route_matching_iface, is_stale_link_down_event, nic_is_gone,
-    wifi_cfg_to_wifi_phy, wifi_phy_ssid,
+    gen_routes_for_wifi_cfg_up, gen_running_route_purge,
+    gen_wifi_cfg_for_new_phy, gen_wifi_phy_ip_purge, handle_event_auto_connect,
+    handle_wifi_phy_event, is_route_matching_iface, is_stale_link_down_event,
+    nic_is_gone, wifi_cfg_to_wifi_phy, wifi_phy_ssid,
 };
 
 fn gen_wifi_cfg_iface() -> Interface {
@@ -789,7 +789,10 @@ fn test_wifi_phy_down_event_generates_ip_purge_when_not_covered() {
     assert_eq!(purge.name(), "wlp194s0");
     assert_eq!(purge.base_iface().state, InterfaceState::Up);
     assert_eq!(purge.base_iface().ipv4, Some(InterfaceIpv4::new_disabled()));
-    assert_eq!(purge.base_iface().ipv6, Some(InterfaceIpv6::new_disabled()));
+    assert_eq!(
+        purge.base_iface().ipv6,
+        Some(InterfaceIpv6::new_purge_keep_link_local())
+    );
 
     // Link-up event: nothing to purge.
     let mut up_event = event.clone();
@@ -818,6 +821,30 @@ fn test_wifi_phy_down_event_generates_ip_purge_when_not_covered() {
         "stale wifi-phy event for a current non-wifi interface must not purge \
          the IP stack"
     );
+}
+
+#[test]
+fn test_wifi_phy_link_down_purges_running_routes_of_iface() {
+    let mut wifi_route = RouteEntry::default();
+    wifi_route.destination = Some("::/0".to_string());
+    wifi_route.next_hop_iface = Some("wlan0".to_string());
+    wifi_route.next_hop_addr = Some("fe80::1".to_string());
+    wifi_route.metric = Some(1024);
+    let mut eth_route = RouteEntry::default();
+    eth_route.destination = Some("::/0".to_string());
+    eth_route.next_hop_iface = Some("eth0".to_string());
+    eth_route.next_hop_addr = Some("fe80::2".to_string());
+    eth_route.metric = Some(1024);
+
+    let mut cur_state = NetworkState::default();
+    cur_state.routes.running = Some(vec![wifi_route, eth_route]);
+
+    let routes = gen_running_route_purge("wlan0", &cur_state);
+
+    assert_eq!(routes.len(), 1);
+    assert!(routes[0].is_absent());
+    assert_eq!(routes[0].destination.as_deref(), Some("::/0"));
+    assert_eq!(routes[0].next_hop_iface.as_deref(), Some("wlan0"));
 }
 
 #[test]
