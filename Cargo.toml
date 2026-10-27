@@ -26,7 +26,7 @@ serde = { version = "1.0.144", features = ["derive"] }
 env_logger = "0.11.0"
 log = "0.4.17"
 serde_json = "1.0.87"
-rmsd_yaml = "0.1.0"
+rmsd_yaml = "0.2.0"
 uuid = { version = "1.6.1", default-features = false, features = ["std", "v7"] }
 futures-util = "0.3.11"
 futures-channel = "0.3.11"
