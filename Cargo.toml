@@ -49,6 +49,7 @@ features = ["feature", "hostname", "socket"]
 
 [workspace.dependencies.nispor]
 git = "https://github.com/nispor/nispor"
+rev = "da7f6db8cf1640b5d1208dd0b128b14a3a7df78b"
 
 [workspace.dependencies.mozim]
 version = "0.3.2"
@@ -56,10 +57,11 @@ default-features = false
 
 [workspace.dependencies.rtnetlink]
 git = "https://github.com/rust-netlink/rtnetlink"
+rev = "47e910d74fad2d00a8b4221db11d53b1287145dd"
 
 [workspace.dependencies.unicode-width]
 version = "0.2.2"
 
 [patch.crates-io]
-rtnetlink = { git = "https://github.com/rust-netlink/rtnetlink" }
-netlink-packet-route = { git = "https://github.com/rust-netlink/netlink-packet-route" }
+rtnetlink = { git = "https://github.com/rust-netlink/rtnetlink", rev = "47e910d74fad2d00a8b4221db11d53b1287145dd" }
+netlink-packet-route = { git = "https://github.com/rust-netlink/netlink-packet-route", rev = "dc30bfa245fcb1f1e543fcdd5aa981c1427f8cb0" }
