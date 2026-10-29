@@ -23,6 +23,12 @@ mod wireguard;
 
 use std::collections::HashSet;
 
+#[cfg(test)]
+pub(crate) use self::{
+    base_iface::np_iface_to_base_iface,
+    route::{np_route_to_nipart, np_routetype_to_nipart},
+    route_rule::get_route_rules,
+};
 use crate::InterfaceType;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
