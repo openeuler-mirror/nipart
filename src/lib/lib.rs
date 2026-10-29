@@ -5,6 +5,7 @@ mod dns;
 mod error;
 mod ipc;
 mod logging;
+mod netlink;
 mod no_daemon;
 mod plugin;
 mod schema;
