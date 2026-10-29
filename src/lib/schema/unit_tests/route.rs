@@ -2,6 +2,7 @@
 
 use crate::{
     Interfaces, MergedInterfaces, MergedRoutes, RouteEntry, RouteState, Routes,
+    schema::RouteProtocol,
 };
 
 #[test]
@@ -77,7 +78,7 @@ fn test_absent_route_matching_running_kernel_route_is_deleted() {
         next_hop_iface: Some("wlan0".to_string()),
         next_hop_addr: Some("fe80::1".to_string()),
         metric: Some(1024),
-        protocol: Some(nispor::RouteProtocol::Ra),
+        protocol: Some(RouteProtocol::Ra),
         ..Default::default()
     };
     current_route.table_id = Some(254);
@@ -94,7 +95,7 @@ fn test_absent_route_matching_running_kernel_route_is_deleted() {
     let changed = &merged_routes.changed_routes[0];
     assert!(changed.is_absent());
     assert_eq!(changed.destination.as_deref(), Some("::/0"));
-    assert_eq!(changed.protocol, Some(nispor::RouteProtocol::Ra));
+    assert_eq!(changed.protocol, Some(RouteProtocol::Ra));
 }
 
 #[test]

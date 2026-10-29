@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::{
     ErrorKind, Interfaces, MergedRoutes, NipartError, RouteEntry, RouteType,
-    Routes,
+    Routes, schema::RouteProtocol,
 };
 
 const SUPPORTED_ROUTE_SCOPE: [nispor::RouteScope; 2] =
@@ -43,6 +43,67 @@ const IPV6_EMPTY_NEXT_HOP_ADDRESS: &str = "::";
 
 // kernel values
 const RTAX_CWND: u32 = 7;
+
+fn np_route_protocol_to_nipart(
+    protocol: nispor::RouteProtocol,
+) -> RouteProtocol {
+    match protocol {
+        nispor::RouteProtocol::Unspec => RouteProtocol::Unspec,
+        nispor::RouteProtocol::IcmpRedirect => RouteProtocol::IcmpRedirect,
+        nispor::RouteProtocol::Kernel => RouteProtocol::Kernel,
+        nispor::RouteProtocol::Boot => RouteProtocol::Boot,
+        nispor::RouteProtocol::Static => RouteProtocol::Static,
+        nispor::RouteProtocol::Gated => RouteProtocol::Gated,
+        nispor::RouteProtocol::Ra => RouteProtocol::Ra,
+        nispor::RouteProtocol::Mrt => RouteProtocol::Mrt,
+        nispor::RouteProtocol::Zebra => RouteProtocol::Zebra,
+        nispor::RouteProtocol::Bird => RouteProtocol::Bird,
+        nispor::RouteProtocol::DnRouted => RouteProtocol::DnRouted,
+        nispor::RouteProtocol::Xorp => RouteProtocol::Xorp,
+        nispor::RouteProtocol::Ntk => RouteProtocol::Ntk,
+        nispor::RouteProtocol::Dhcp => RouteProtocol::Dhcp,
+        nispor::RouteProtocol::Mrouted => RouteProtocol::Mrouted,
+        nispor::RouteProtocol::KeepAlived => RouteProtocol::KeepAlived,
+        nispor::RouteProtocol::Babel => RouteProtocol::Babel,
+        nispor::RouteProtocol::Bgp => RouteProtocol::Bgp,
+        nispor::RouteProtocol::Isis => RouteProtocol::Isis,
+        nispor::RouteProtocol::Ospf => RouteProtocol::Ospf,
+        nispor::RouteProtocol::Rip => RouteProtocol::Rip,
+        nispor::RouteProtocol::Eigrp => RouteProtocol::Eigrp,
+        nispor::RouteProtocol::Other(value) => RouteProtocol::Other(value),
+        _ => RouteProtocol::Unspec,
+    }
+}
+
+fn nipart_route_protocol_to_nispor(
+    protocol: RouteProtocol,
+) -> nispor::RouteProtocol {
+    match protocol {
+        RouteProtocol::Unspec => nispor::RouteProtocol::Unspec,
+        RouteProtocol::IcmpRedirect => nispor::RouteProtocol::IcmpRedirect,
+        RouteProtocol::Kernel => nispor::RouteProtocol::Kernel,
+        RouteProtocol::Boot => nispor::RouteProtocol::Boot,
+        RouteProtocol::Static => nispor::RouteProtocol::Static,
+        RouteProtocol::Gated => nispor::RouteProtocol::Gated,
+        RouteProtocol::Ra => nispor::RouteProtocol::Ra,
+        RouteProtocol::Mrt => nispor::RouteProtocol::Mrt,
+        RouteProtocol::Zebra => nispor::RouteProtocol::Zebra,
+        RouteProtocol::Bird => nispor::RouteProtocol::Bird,
+        RouteProtocol::DnRouted => nispor::RouteProtocol::DnRouted,
+        RouteProtocol::Xorp => nispor::RouteProtocol::Xorp,
+        RouteProtocol::Ntk => nispor::RouteProtocol::Ntk,
+        RouteProtocol::Dhcp => nispor::RouteProtocol::Dhcp,
+        RouteProtocol::Mrouted => nispor::RouteProtocol::Mrouted,
+        RouteProtocol::KeepAlived => nispor::RouteProtocol::KeepAlived,
+        RouteProtocol::Babel => nispor::RouteProtocol::Babel,
+        RouteProtocol::Bgp => nispor::RouteProtocol::Bgp,
+        RouteProtocol::Isis => nispor::RouteProtocol::Isis,
+        RouteProtocol::Ospf => nispor::RouteProtocol::Ospf,
+        RouteProtocol::Rip => nispor::RouteProtocol::Rip,
+        RouteProtocol::Eigrp => nispor::RouteProtocol::Eigrp,
+        RouteProtocol::Other(value) => nispor::RouteProtocol::Other(value),
+    }
+}
 
 pub(crate) async fn get_routes(_ifaces: &Interfaces) -> Routes {
     let mut ret = Routes::default();
@@ -139,7 +200,7 @@ fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
         } else {
             None
         },
-        protocol: Some(np_route.protocol),
+        protocol: Some(np_route_protocol_to_nipart(np_route.protocol)),
         ..Default::default()
     };
     if np_route.address_family == nispor::AddressFamily::Ipv6 {
@@ -232,7 +293,7 @@ fn np_route_to_nipart(np_route: &nispor::Route) -> RouteEntry {
         } else {
             None
         },
-        protocol: Some(np_route.protocol),
+        protocol: Some(np_route_protocol_to_nipart(np_route.protocol)),
         ..Default::default()
     }
 }
@@ -273,7 +334,7 @@ fn nipart_to_nispor_route_conf(
     ret.via.clone_from(&nipart_rt.next_hop_addr);
     ret.metric = nipart_rt.metric.and_then(|m| u32::try_from(m).ok());
     ret.onlink = nipart_rt.onlink.unwrap_or_default();
-    ret.protocol = nipart_rt.protocol;
+    ret.protocol = nipart_rt.protocol.map(nipart_route_protocol_to_nispor);
     if let Some(table_id) = nipart_rt.table_id {
         if table_id > u8::MAX.into() {
             return Err(NipartError::new(
