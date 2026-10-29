@@ -3,6 +3,9 @@
 mod mac;
 mod sysfs;
 
+#[cfg(test)]
+mod unit_tests;
+
 use crate::{ErrorKind, NipartError};
 
 #[allow(dead_code)]
