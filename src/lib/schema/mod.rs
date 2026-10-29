@@ -29,6 +29,7 @@ pub(crate) mod deserializer;
 pub(crate) mod serializer;
 
 pub(crate) use iface_search::IfaceSearch;
+pub(crate) use route::RouteProtocol;
 
 pub use self::{
     auto_connect::InterfaceAutoConnect,

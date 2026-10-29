@@ -396,7 +396,7 @@ pub struct RouteEntry {
     #[serde(skip)]
     /// Kernel protocol of a queried running route. Used when building the
     /// matching delete request (e.g. `ra`); not part of the YAML schema.
-    pub(crate) protocol: Option<nispor::RouteProtocol>,
+    pub(crate) protocol: Option<RouteProtocol>,
 }
 
 #[derive(
@@ -738,33 +738,8 @@ impl RouteEntry {
     }
 }
 
-fn route_protocol_sort_key(protocol: Option<nispor::RouteProtocol>) -> u32 {
-    match protocol {
-        None | Some(nispor::RouteProtocol::Unspec) => 0,
-        Some(nispor::RouteProtocol::Other(value)) => u32::from(value),
-        Some(nispor::RouteProtocol::IcmpRedirect) => 1,
-        Some(nispor::RouteProtocol::Kernel) => 2,
-        Some(nispor::RouteProtocol::Boot) => 3,
-        Some(nispor::RouteProtocol::Static) => 4,
-        Some(nispor::RouteProtocol::Gated) => 8,
-        Some(nispor::RouteProtocol::Mrt) => 10,
-        Some(nispor::RouteProtocol::Zebra) => 11,
-        Some(nispor::RouteProtocol::Bird) => 12,
-        Some(nispor::RouteProtocol::DnRouted) => 13,
-        Some(nispor::RouteProtocol::Xorp) => 14,
-        Some(nispor::RouteProtocol::Ntk) => 15,
-        Some(nispor::RouteProtocol::Dhcp) => 16,
-        Some(nispor::RouteProtocol::Mrouted) => 17,
-        Some(nispor::RouteProtocol::KeepAlived) => 18,
-        Some(nispor::RouteProtocol::Ra) => 24,
-        Some(nispor::RouteProtocol::Babel) => 42,
-        Some(nispor::RouteProtocol::Bgp) => 186,
-        Some(nispor::RouteProtocol::Isis) => 187,
-        Some(nispor::RouteProtocol::Ospf) => 188,
-        Some(nispor::RouteProtocol::Rip) => 189,
-        Some(nispor::RouteProtocol::Eigrp) => 192,
-        Some(_) => 0,
-    }
+fn route_protocol_sort_key(protocol: Option<RouteProtocol>) -> u32 {
+    protocol.map(RouteProtocol::sort_key).unwrap_or_default()
 }
 
 // For Vec::dedup()
