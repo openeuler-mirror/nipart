@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{BaseInterface, RouteEntry, RouteRules, no_daemon};
+use crate::{
+    BaseInterface, InterfaceIpv4, InterfaceIpv6, RouteEntry, RouteRules,
+    no_daemon,
+};
 
 pub(super) fn nispor_iface_from_json(json: &str) -> nispor::Iface {
     serde_json::from_str(json).expect("Invalid nispor Iface fixture")
@@ -18,6 +21,14 @@ pub(super) fn base_iface_from_nispor_json(json: &str) -> BaseInterface {
     no_daemon::np_iface_to_base_iface(&nispor_iface_from_json(json))
 }
 
+pub(super) fn ipv4_from_nispor_json(json: &str) -> Option<InterfaceIpv4> {
+    no_daemon::np_ipv4_to_nipart(&nispor_iface_from_json(json))
+}
+
+pub(super) fn ipv6_from_nispor_json(json: &str) -> Option<InterfaceIpv6> {
+    no_daemon::np_ipv6_to_nipart(&nispor_iface_from_json(json))
+}
+
 pub(super) fn route_entry_from_nispor_json(json: &str) -> RouteEntry {
     no_daemon::np_route_to_nipart(&nispor_route_from_json(json))
 }
@@ -28,6 +39,12 @@ pub(super) fn route_entry_for_type_from_nispor_json(json: &str) -> RouteEntry {
 
 pub(super) fn route_rules_from_nispor_json(json: &str) -> RouteRules {
     no_daemon::get_route_rules(&[nispor_route_rule_from_json(json)])
+}
+
+pub(super) fn route_rules_from_nispor_json_array(json: &str) -> RouteRules {
+    let rules: Vec<nispor::RouteRule> =
+        serde_json::from_str(json).expect("Invalid nispor RouteRule fixtures");
+    no_daemon::get_route_rules(&rules)
 }
 
 #[cfg(test)]
