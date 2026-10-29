@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod link;
 mod mac;
 mod sysfs;
 

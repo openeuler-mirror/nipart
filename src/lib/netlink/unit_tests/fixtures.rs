@@ -13,7 +13,7 @@ use rtnetlink::packet_route::{
     rule::{RuleAction, RuleHeader, RuleMessage},
 };
 
-pub(super) fn link_message(
+pub(crate) fn link_message(
     index: u32,
     name: &str,
     link_layer_type: LinkLayerType,
@@ -31,7 +31,7 @@ pub(super) fn link_message(
     message
 }
 
-pub(super) fn address_message(
+pub(crate) fn address_message(
     family: AddressFamily,
     index: u32,
     prefix_len: u8,
@@ -51,7 +51,7 @@ pub(super) fn address_message(
     message
 }
 
-pub(super) fn route_message(
+pub(crate) fn route_message(
     family: AddressFamily,
     destination_prefix_length: u8,
 ) -> RouteMessage {
@@ -68,7 +68,7 @@ pub(super) fn route_message(
     message
 }
 
-pub(super) fn rule_message(
+pub(crate) fn rule_message(
     family: AddressFamily,
     action: RuleAction,
 ) -> RuleMessage {
@@ -82,7 +82,7 @@ pub(super) fn rule_message(
     message
 }
 
-pub(super) fn link_info_attribute(
+pub(crate) fn link_info_attribute(
     kind: InfoKind,
     data: Option<InfoData>,
 ) -> LinkAttribute {
@@ -93,11 +93,11 @@ pub(super) fn link_info_attribute(
     LinkAttribute::LinkInfo(infos)
 }
 
-pub(super) fn vlan_info_data(id: u16, protocol: u16) -> InfoData {
+pub(crate) fn vlan_info_data(id: u16, protocol: u16) -> InfoData {
     InfoData::Vlan(vec![InfoVlan::Id(id), InfoVlan::Protocol(protocol.into())])
 }
 
-pub(super) fn veth_info_data(peer_name: &str, peer_index: u32) -> InfoData {
+pub(crate) fn veth_info_data(peer_name: &str, peer_index: u32) -> InfoData {
     InfoData::Veth(InfoVeth::Peer(link_message(
         peer_index,
         peer_name,
