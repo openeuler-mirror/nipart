@@ -170,7 +170,7 @@ pub(crate) async fn get_routes(_ifaces: &Interfaces) -> Routes {
     ret
 }
 
-fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
+pub(crate) fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
     let destination = match &np_route.dst {
         Some(dst) => Some(dst.to_string()),
         None => match np_route.address_family {
@@ -226,7 +226,7 @@ fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
     route_entry
 }
 
-fn np_route_to_nipart(np_route: &nispor::Route) -> RouteEntry {
+pub(crate) fn np_route_to_nipart(np_route: &nispor::Route) -> RouteEntry {
     let destination = match &np_route.dst {
         Some(dst) => Some(dst.to_string()),
         None => match np_route.address_family {
