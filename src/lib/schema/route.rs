@@ -411,6 +411,105 @@ pub enum RouteType {
     Prohibit,
 }
 
+/// Kernel route protocol (`RTPROT_*`).
+///
+/// This is the backend independent representation of the kernel route
+/// protocol, used for route identity and sorting. It is not part of the YAML
+/// schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum RouteProtocol {
+    #[default]
+    Unspec,
+    IcmpRedirect,
+    Kernel,
+    Boot,
+    Static,
+    Gated,
+    Ra,
+    Mrt,
+    Zebra,
+    Bird,
+    DnRouted,
+    Xorp,
+    Ntk,
+    Dhcp,
+    Mrouted,
+    KeepAlived,
+    Babel,
+    Bgp,
+    Isis,
+    Ospf,
+    Rip,
+    Eigrp,
+    Other(u8),
+}
+
+impl From<u8> for RouteProtocol {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Unspec,
+            1 => Self::IcmpRedirect,
+            2 => Self::Kernel,
+            3 => Self::Boot,
+            4 => Self::Static,
+            8 => Self::Gated,
+            9 => Self::Ra,
+            10 => Self::Mrt,
+            11 => Self::Zebra,
+            12 => Self::Bird,
+            13 => Self::DnRouted,
+            14 => Self::Xorp,
+            15 => Self::Ntk,
+            16 => Self::Dhcp,
+            17 => Self::Mrouted,
+            18 => Self::KeepAlived,
+            42 => Self::Babel,
+            186 => Self::Bgp,
+            187 => Self::Isis,
+            188 => Self::Ospf,
+            189 => Self::Rip,
+            192 => Self::Eigrp,
+            value => Self::Other(value),
+        }
+    }
+}
+
+impl From<RouteProtocol> for u8 {
+    fn from(protocol: RouteProtocol) -> Self {
+        match protocol {
+            RouteProtocol::Unspec => 0,
+            RouteProtocol::IcmpRedirect => 1,
+            RouteProtocol::Kernel => 2,
+            RouteProtocol::Boot => 3,
+            RouteProtocol::Static => 4,
+            RouteProtocol::Gated => 8,
+            RouteProtocol::Ra => 9,
+            RouteProtocol::Mrt => 10,
+            RouteProtocol::Zebra => 11,
+            RouteProtocol::Bird => 12,
+            RouteProtocol::DnRouted => 13,
+            RouteProtocol::Xorp => 14,
+            RouteProtocol::Ntk => 15,
+            RouteProtocol::Dhcp => 16,
+            RouteProtocol::Mrouted => 17,
+            RouteProtocol::KeepAlived => 18,
+            RouteProtocol::Babel => 42,
+            RouteProtocol::Bgp => 186,
+            RouteProtocol::Isis => 187,
+            RouteProtocol::Ospf => 188,
+            RouteProtocol::Rip => 189,
+            RouteProtocol::Eigrp => 192,
+            RouteProtocol::Other(value) => value,
+        }
+    }
+}
+
+impl RouteProtocol {
+    pub(crate) fn sort_key(self) -> u32 {
+        u32::from(u8::from(self))
+    }
+}
+
 const RTN_UNICAST: u8 = 1;
 const RTN_BLACKHOLE: u8 = 6;
 const RTN_UNREACHABLE: u8 = 7;
@@ -747,4 +846,62 @@ fn validate_route_dst(route: &RouteEntry) -> Result<(), NipartError> {
         return Ok(());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RouteProtocol;
+
+    #[test]
+    fn test_route_protocol_numeric_values() {
+        let known_values = [
+            (RouteProtocol::Unspec, 0),
+            (RouteProtocol::IcmpRedirect, 1),
+            (RouteProtocol::Kernel, 2),
+            (RouteProtocol::Boot, 3),
+            (RouteProtocol::Static, 4),
+            (RouteProtocol::Gated, 8),
+            (RouteProtocol::Ra, 9),
+            (RouteProtocol::Mrt, 10),
+            (RouteProtocol::Zebra, 11),
+            (RouteProtocol::Bird, 12),
+            (RouteProtocol::DnRouted, 13),
+            (RouteProtocol::Xorp, 14),
+            (RouteProtocol::Ntk, 15),
+            (RouteProtocol::Dhcp, 16),
+            (RouteProtocol::Mrouted, 17),
+            (RouteProtocol::KeepAlived, 18),
+            (RouteProtocol::Babel, 42),
+            (RouteProtocol::Bgp, 186),
+            (RouteProtocol::Isis, 187),
+            (RouteProtocol::Ospf, 188),
+            (RouteProtocol::Rip, 189),
+            (RouteProtocol::Eigrp, 192),
+        ];
+        for (protocol, value) in known_values {
+            assert_eq!(u8::from(protocol), value);
+            assert_eq!(RouteProtocol::from(value), protocol);
+        }
+    }
+
+    #[test]
+    fn test_route_protocol_unknown_value() {
+        let protocol = RouteProtocol::from(200);
+        assert_eq!(protocol, RouteProtocol::Other(200));
+        assert_eq!(u8::from(protocol), 200);
+    }
+
+    #[test]
+    fn test_route_protocol_sort_key() {
+        assert_eq!(RouteProtocol::Unspec.sort_key(), 0);
+        assert_eq!(RouteProtocol::Ra.sort_key(), 9);
+        assert_eq!(RouteProtocol::Other(200).sort_key(), 200);
+        assert!(
+            RouteProtocol::Kernel.sort_key() < RouteProtocol::Static.sort_key()
+        );
+        assert!(
+            RouteProtocol::Static.sort_key()
+                < RouteProtocol::Other(200).sort_key()
+        );
+    }
 }
