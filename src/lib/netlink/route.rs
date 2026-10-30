@@ -80,3 +80,12 @@ pub(crate) fn route_table(message: &RouteMessage) -> u32 {
     table
 }
 
+pub(crate) fn is_supported_route(
+    message: &RouteMessage,
+    protocol: RouteProtocol,
+) -> bool {
+    SUPPORTED_ROUTE_PROTOCOL.contains(&protocol)
+        && route_table(message) != LOCAL_ROUTE_TABLE
+        && SUPPORTED_ROUTE_SCOPE.contains(&message.header.scope)
+}
+
