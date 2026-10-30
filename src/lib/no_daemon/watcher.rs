@@ -13,8 +13,7 @@ use rtnetlink::{
 };
 
 use crate::{
-    ErrorKind, NipartError, NipartNoDaemon,
-    netlink::addr::has_link_local_addr,
+    ErrorKind, NipartError, NipartNoDaemon, netlink::addr::has_link_local_addr,
 };
 
 const LINK_CARRIER_QUERY_INTERVAL_SEC: u64 = 30;

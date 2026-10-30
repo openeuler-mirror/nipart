@@ -49,60 +49,37 @@ fn cache_info(preferred: u32, valid: u32) -> AddressAttribute {
 #[test]
 fn test_parse_ipv4_static_address() {
     let message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 10,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
         AddressAttribute::Local(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
         cache_info(u32::MAX, u32::MAX),
     ]);
     let info = address_info(&message).unwrap();
     assert_eq!(info.iface_index, 3);
-    assert_eq!(
-        info.address.ip,
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
-    );
+    assert_eq!(info.address.ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
     assert_eq!(info.address.prefix_length, 24);
     assert_eq!(info.address.valid_life_time.as_deref(), Some("forever"));
-    assert_eq!(
-        info.address.preferred_life_time.as_deref(),
-        Some("forever")
-    );
+    assert_eq!(info.address.preferred_life_time.as_deref(), Some("forever"));
 }
 
 #[test]
 fn test_parse_ipv4_prefers_local_attribute() {
     let message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            198, 51, 100, 1,
-        ))),
-        AddressAttribute::Local(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 1,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
+        AddressAttribute::Local(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
     ]);
     let info = address_info(&message).unwrap();
-    assert_eq!(
-        info.address.ip,
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
-    );
+    assert_eq!(info.address.ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
 }
 
 #[test]
 fn test_parse_ipv4_dynamic_lifetime() {
     let message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 20,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))),
         cache_info(1800, 3600),
     ]);
     let info = address_info(&message).unwrap();
-    assert_eq!(
-        info.address.valid_life_time.as_deref(),
-        Some("3600sec")
-    );
-    assert_eq!(
-        info.address.preferred_life_time.as_deref(),
-        Some("1800sec")
-    );
+    assert_eq!(info.address.valid_life_time.as_deref(), Some("3600sec"));
+    assert_eq!(info.address.preferred_life_time.as_deref(), Some("1800sec"));
 }
 
 #[test]
@@ -163,10 +140,7 @@ fn test_parse_address_flags_and_protocol() {
     let info = address_info(&message).unwrap();
     assert!(info.flags.contains(AddressFlags::Permanent));
     assert!(info.flags.contains(AddressFlags::Noprefixroute));
-    assert_eq!(
-        info.protocol,
-        Some(AddressProtocol::RouterAnnouncement)
-    );
+    assert_eq!(info.protocol, Some(AddressProtocol::RouterAnnouncement));
 }
 
 #[test]
@@ -186,9 +160,7 @@ fn test_lifetime_to_string() {
 #[test]
 fn test_ipv4_conversion_static_address() {
     let message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 10,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
         cache_info(u32::MAX, u32::MAX),
     ]);
     let info = address_info(&message).unwrap();
@@ -197,10 +169,7 @@ fn test_ipv4_conversion_static_address() {
     assert_eq!(ipv4.dhcp, Some(false));
     let addresses = ipv4.addresses.unwrap();
     assert_eq!(addresses.len(), 1);
-    assert_eq!(
-        addresses[0].ip,
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
-    );
+    assert_eq!(addresses[0].ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
     assert_eq!(addresses[0].prefix_length, 24);
     assert_eq!(addresses[0].valid_life_time, None);
     assert_eq!(addresses[0].preferred_life_time, None);
@@ -209,23 +178,15 @@ fn test_ipv4_conversion_static_address() {
 #[test]
 fn test_ipv4_conversion_dhcp_address() {
     let message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 20,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))),
         cache_info(1800, 3600),
     ]);
     let info = address_info(&message).unwrap();
     let ipv4 = ipv4_from_address_infos([&info]).unwrap();
     assert_eq!(ipv4.dhcp, Some(true));
     let addresses = ipv4.addresses.unwrap();
-    assert_eq!(
-        addresses[0].valid_life_time.as_deref(),
-        Some("3600sec")
-    );
-    assert_eq!(
-        addresses[0].preferred_life_time.as_deref(),
-        Some("1800sec")
-    );
+    assert_eq!(addresses[0].valid_life_time.as_deref(), Some("3600sec"));
+    assert_eq!(addresses[0].preferred_life_time.as_deref(), Some("1800sec"));
 }
 
 #[test]
@@ -314,9 +275,7 @@ fn test_empty_address_lists_are_disabled() {
 #[test]
 fn test_address_maps_group_by_interface() {
     let mut message = ipv4_message(vec![
-        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
-            192, 0, 2, 10,
-        ))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
         cache_info(u32::MAX, u32::MAX),
     ]);
     let mut second = ipv6_message(
@@ -348,8 +307,10 @@ fn test_address_maps_group_by_interface() {
 
 #[test]
 fn test_address_add_message_static_ipv4() {
-    let address =
-        crate::InterfaceIpAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 24);
+    let address = crate::InterfaceIpAddr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        24,
+    );
     let message =
         crate::netlink::addr::address_add_message(7, &address, None).unwrap();
     assert_eq!(message.header.family, AddressFamily::Inet);
@@ -407,8 +368,8 @@ fn test_address_add_message_rejects_invalid_prefix() {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         64,
     );
-    let error =
-        crate::netlink::addr::address_add_message(7, &address, None).unwrap_err();
+    let error = crate::netlink::addr::address_add_message(7, &address, None)
+        .unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::InvalidArgument);
 }
 
@@ -444,8 +405,8 @@ fn test_address_delete_message_rejects_invalid_prefix() {
         IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         129,
     );
-    let error =
-        crate::netlink::addr::address_del_message(7, &address, None).unwrap_err();
+    let error = crate::netlink::addr::address_del_message(7, &address, None)
+        .unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::InvalidArgument);
 }
 
@@ -460,10 +421,10 @@ fn test_address_add_message_permanent_lifetime_has_no_cache_info() {
     let message =
         crate::netlink::addr::address_add_message(7, &address, None).unwrap();
     assert!(
-        !message
-            .attributes
-            .iter()
-            .any(|attribute| matches!(attribute, AddressAttribute::CacheInfo(_)))
+        !message.attributes.iter().any(|attribute| matches!(
+            attribute,
+            AddressAttribute::CacheInfo(_)
+        ))
     );
 }
 
@@ -499,20 +460,18 @@ fn test_ipv6_link_local_not_removed_when_enabled() {
     });
     let cur_iface = iface_with_ipv6(InterfaceIpv6 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("fe80::1", 64),
-            addr("2001:db8::1", 64),
-        ]),
+        addresses: Some(vec![addr("fe80::1", 64), addr("2001:db8::1", 64)]),
         ..Default::default()
     });
 
-    let actions = crate::netlink::addr::ip_address_actions(
-        &des_iface,
-        Some(&cur_iface),
-    );
+    let actions =
+        crate::netlink::addr::ip_address_actions(&des_iface, Some(&cur_iface));
     assert_eq!(actions.len(), 1);
     assert!(actions[0].remove);
-    assert_eq!(actions[0].address.ip, "2001:db8::1".parse::<IpAddr>().unwrap());
+    assert_eq!(
+        actions[0].address.ip,
+        "2001:db8::1".parse::<IpAddr>().unwrap()
+    );
 }
 
 #[test]
@@ -527,10 +486,8 @@ fn test_ipv6_link_local_removed_when_disabled() {
         ..Default::default()
     });
 
-    let actions = crate::netlink::addr::ip_address_actions(
-        &des_iface,
-        Some(&cur_iface),
-    );
+    let actions =
+        crate::netlink::addr::ip_address_actions(&des_iface, Some(&cur_iface));
     assert_eq!(actions.len(), 1);
     assert!(actions[0].remove);
     assert_eq!(actions[0].address.ip, "fe80::1".parse::<IpAddr>().unwrap());
@@ -549,17 +506,12 @@ fn test_ipv4_appending_only_adds_new_address() {
     });
     let cur_iface = iface_with_ipv4(InterfaceIpv4 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("192.0.2.10", 24),
-            addr("192.0.2.11", 24),
-        ]),
+        addresses: Some(vec![addr("192.0.2.10", 24), addr("192.0.2.11", 24)]),
         ..Default::default()
     });
 
-    let actions = crate::netlink::addr::ip_address_actions(
-        &des_iface,
-        Some(&cur_iface),
-    );
+    let actions =
+        crate::netlink::addr::ip_address_actions(&des_iface, Some(&cur_iface));
     assert_eq!(actions.len(), 1);
     assert!(!actions[0].remove);
     assert_eq!(
@@ -572,25 +524,17 @@ fn test_ipv4_appending_only_adds_new_address() {
 fn test_ipv4_replacing_keeps_all_addresses() {
     let des_iface = iface_with_ipv4(InterfaceIpv4 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("192.0.2.12", 24),
-            addr("192.0.2.10", 24),
-        ]),
+        addresses: Some(vec![addr("192.0.2.12", 24), addr("192.0.2.10", 24)]),
         ..Default::default()
     });
     let cur_iface = iface_with_ipv4(InterfaceIpv4 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("192.0.2.10", 24),
-            addr("192.0.2.12", 24),
-        ]),
+        addresses: Some(vec![addr("192.0.2.10", 24), addr("192.0.2.12", 24)]),
         ..Default::default()
     });
 
-    let actions = crate::netlink::addr::ip_address_actions(
-        &des_iface,
-        Some(&cur_iface),
-    );
+    let actions =
+        crate::netlink::addr::ip_address_actions(&des_iface, Some(&cur_iface));
     assert_eq!(actions.len(), 2);
     assert!(actions.iter().all(|action| !action.remove));
 }
@@ -599,25 +543,17 @@ fn test_ipv4_replacing_keeps_all_addresses() {
 fn test_ipv4_reordering_purges_then_adds() {
     let des_iface = iface_with_ipv4(InterfaceIpv4 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("192.0.2.12", 24),
-            addr("192.0.2.11", 24),
-        ]),
+        addresses: Some(vec![addr("192.0.2.12", 24), addr("192.0.2.11", 24)]),
         ..Default::default()
     });
     let cur_iface = iface_with_ipv4(InterfaceIpv4 {
         enabled: Some(true),
-        addresses: Some(vec![
-            addr("192.0.2.10", 24),
-            addr("192.0.2.11", 24),
-        ]),
+        addresses: Some(vec![addr("192.0.2.10", 24), addr("192.0.2.11", 24)]),
         ..Default::default()
     });
 
-    let actions = crate::netlink::addr::ip_address_actions(
-        &des_iface,
-        Some(&cur_iface),
-    );
+    let actions =
+        crate::netlink::addr::ip_address_actions(&des_iface, Some(&cur_iface));
     assert_eq!(actions.len(), 4);
     assert!(actions[0].remove);
     assert!(actions[1].remove);
