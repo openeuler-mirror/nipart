@@ -16,7 +16,7 @@ pub(crate) struct LinkIndexMap {
 
 #[allow(dead_code)]
 impl LinkIndexMap {
-    fn insert(&mut self, index: u32, name: String) {
+    pub(crate) fn insert(&mut self, index: u32, name: String) {
         self.by_index.insert(index, name.clone());
         self.by_name.insert(name, index);
     }

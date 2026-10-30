@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-mod link;
+pub(crate) mod link;
 mod mac;
+pub(crate) mod route;
+pub(crate) mod rule;
 mod sysfs;
 
 #[cfg(test)]
@@ -9,11 +11,20 @@ mod unit_tests;
 
 use crate::{ErrorKind, NipartError};
 
-#[allow(dead_code)]
 pub(crate) async fn new_connection() -> Result<rtnetlink::Handle, NipartError> {
     let (connection, handle, _) = rtnetlink::new_connection().map_err(|e| {
         map_io_error("Failed to create rtnetlink connection", e)
     })?;
+    tokio::spawn(connection);
+    Ok(handle)
+}
+
+pub(crate) async fn new_connection_with_strict_check()
+-> Result<rtnetlink::Handle, NipartError> {
+    let (connection, handle, _) = rtnetlink::new_connection_with_strict_check()
+        .map_err(|e| {
+            map_io_error("Failed to create strict rtnetlink connection", e)
+        })?;
     tokio::spawn(connection);
     Ok(handle)
 }
