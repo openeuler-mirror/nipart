@@ -346,3 +346,124 @@ fn test_address_maps_group_by_interface() {
         IpAddr::V6("2001:db8::10".parse::<Ipv6Addr>().unwrap())
     );
 }
+
+#[test]
+fn test_address_add_message_static_ipv4() {
+    let address =
+        crate::InterfaceIpAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 24);
+    let message =
+        crate::netlink::addr::address_add_message(7, &address, None).unwrap();
+    assert_eq!(message.header.family, AddressFamily::Inet);
+    assert_eq!(message.header.index, 7);
+    assert_eq!(message.header.prefix_len, 24);
+    assert!(matches!(
+        message.attributes.as_slice(),
+        [
+            AddressAttribute::Address(_),
+            AddressAttribute::Local(_),
+            AddressAttribute::Broadcast(_),
+        ]
+    ));
+}
+
+#[test]
+fn test_address_add_message_dynamic_ipv6() {
+    let mut address = crate::InterfaceIpAddr::new(
+        IpAddr::V6("2001:db8::30".parse::<Ipv6Addr>().unwrap()),
+        128,
+    );
+    address.valid_life_time = Some("3600sec".to_string());
+    address.preferred_life_time = Some("1800sec".to_string());
+    let message = crate::netlink::addr::address_add_message(
+        7,
+        &address,
+        Some(AddressProtocol::RouterAnnouncement),
+    )
+    .unwrap();
+    assert_eq!(message.header.family, AddressFamily::Inet6);
+    assert!(message.attributes.iter().any(|attribute| {
+        matches!(
+            attribute,
+            AddressAttribute::Protocol(AddressProtocol::RouterAnnouncement)
+        )
+    }));
+    let cache_info = message
+        .attributes
+        .iter()
+        .find_map(|attribute| {
+            if let AddressAttribute::CacheInfo(cache_info) = attribute {
+                Some(*cache_info)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(cache_info.ifa_valid, 3600);
+    assert_eq!(cache_info.ifa_preferred, 1800);
+}
+
+#[test]
+fn test_address_add_message_rejects_invalid_prefix() {
+    let address = crate::InterfaceIpAddr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        64,
+    );
+    let error =
+        crate::netlink::addr::address_add_message(7, &address, None).unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_address_delete_message_ipv6() {
+    let address = crate::InterfaceIpAddr::new(
+        IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()),
+        64,
+    );
+    let message = crate::netlink::addr::address_del_message(
+        7,
+        &address,
+        Some(AddressProtocol::LinkLocal),
+    )
+    .unwrap();
+    assert_eq!(message.header.family, AddressFamily::Inet6);
+    assert_eq!(message.header.index, 7);
+    assert_eq!(message.header.prefix_len, 64);
+    assert_eq!(
+        message.attributes,
+        vec![
+            AddressAttribute::Address(IpAddr::V6(
+                "fe80::1".parse::<Ipv6Addr>().unwrap()
+            )),
+            AddressAttribute::Protocol(AddressProtocol::LinkLocal),
+        ]
+    );
+}
+
+#[test]
+fn test_address_delete_message_rejects_invalid_prefix() {
+    let address = crate::InterfaceIpAddr::new(
+        IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        129,
+    );
+    let error =
+        crate::netlink::addr::address_del_message(7, &address, None).unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_address_add_message_permanent_lifetime_has_no_cache_info() {
+    let mut address = crate::InterfaceIpAddr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+        24,
+    );
+    address.valid_life_time = Some("forever".to_string());
+    address.preferred_life_time = Some("forever".to_string());
+    let message =
+        crate::netlink::addr::address_add_message(7, &address, None).unwrap();
+    assert!(
+        !message
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, AddressAttribute::CacheInfo(_)))
+    );
+}
