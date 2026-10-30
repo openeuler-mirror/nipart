@@ -321,3 +321,39 @@ fn test_route_add_message_ipv6() {
     )));
 }
 
+#[test]
+fn test_route_del_message_protocol_and_scope() {
+    for (protocol, destination) in [
+        (RouteProtocol::Ra, "::/0"),
+        (RouteProtocol::Dhcp, "198.51.100.0/24"),
+    ] {
+        let route = RouteEntry {
+            state: Some(RouteState::Absent),
+            destination: Some(destination.to_string()),
+            next_hop_iface: Some("dummy0".to_string()),
+            metric: Some(1024),
+            table_id: Some(100),
+            protocol: Some(protocol),
+            ..Default::default()
+        };
+        let message = route_del_message(&route, &index_map()).unwrap();
+        assert_eq!(
+            message.header.protocol,
+            crate::netlink::route::route_protocol_to_netlink(protocol)
+        );
+        assert_eq!(message.header.table, 100);
+        assert_eq!(message.header.scope, RouteScope::NoWhere);
+        assert_eq!(message.header.kind, RouteType::Unspec);
+        assert!(message.attributes.contains(&RouteAttribute::Priority(1024)));
+    }
+
+    let route = RouteEntry {
+        state: Some(RouteState::Absent),
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        ..Default::default()
+    };
+    let message = route_del_message(&route, &index_map()).unwrap();
+    assert_eq!(message.header.protocol, NetlinkRouteProtocol::Unspec);
+}
+
