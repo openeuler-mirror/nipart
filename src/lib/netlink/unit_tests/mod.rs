@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub(super) mod addr;
+pub(super) mod addr_parity;
 pub(super) mod fixtures;
 pub(super) mod parity;
 pub(super) mod parity_addr_route_rule;
