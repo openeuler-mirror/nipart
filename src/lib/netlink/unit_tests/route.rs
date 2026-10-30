@@ -264,3 +264,60 @@ fn test_route_dump_filters() {
     }));
 }
 
+#[test]
+fn test_route_add_message_ipv4() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        next_hop_addr: Some("192.0.2.1".to_string()),
+        source: Some("192.0.2.10".to_string()),
+        metric: Some(100),
+        table_id: Some(100),
+        onlink: Some(true),
+        protocol: Some(RouteProtocol::Static),
+        ..Default::default()
+    };
+    let message = route_add_message(&route, &index_map()).unwrap();
+    assert_eq!(message.header.address_family, AddressFamily::Inet);
+    assert_eq!(message.header.destination_prefix_length, 24);
+    assert_eq!(message.header.table, 100);
+    assert_eq!(message.header.protocol, NetlinkRouteProtocol::Static);
+    assert_eq!(message.header.scope, RouteScope::Universe);
+    assert_eq!(message.header.kind, RouteType::Unicast);
+    assert!(message.header.flags.contains(RouteFlags::Onlink));
+    assert!(message.attributes.contains(&RouteAttribute::Destination(
+        Ipv4Addr::new(198, 51, 100, 0).into()
+    )));
+    assert!(message.attributes.contains(&RouteAttribute::Oif(2)));
+    assert!(message.attributes.contains(&RouteAttribute::Gateway(
+        Ipv4Addr::new(192, 0, 2, 1).into()
+    )));
+    assert!(message.attributes.contains(&RouteAttribute::PrefSource(
+        Ipv4Addr::new(192, 0, 2, 10).into()
+    )));
+    assert!(message.attributes.contains(&RouteAttribute::Priority(100)));
+}
+
+#[test]
+fn test_route_add_message_ipv6() {
+    let route = RouteEntry {
+        destination: Some("2001:db8:1::/64".to_string()),
+        next_hop_iface: Some("dummy1".to_string()),
+        next_hop_addr: Some("2001:db8::1".to_string()),
+        source: Some("2001:db8::10".to_string()),
+        metric: Some(100),
+        table_id: Some(100),
+        ..Default::default()
+    };
+    let message = route_add_message(&route, &index_map()).unwrap();
+    assert_eq!(message.header.address_family, AddressFamily::Inet6);
+    assert_eq!(message.header.protocol, NetlinkRouteProtocol::Static);
+    assert!(message.attributes.contains(&RouteAttribute::Destination(
+        "2001:db8:1::".parse::<Ipv6Addr>().unwrap().into()
+    )));
+    assert!(message.attributes.contains(&RouteAttribute::Oif(3)));
+    assert!(message.attributes.contains(&RouteAttribute::Gateway(
+        "2001:db8::1".parse::<Ipv6Addr>().unwrap().into()
+    )));
+}
+
