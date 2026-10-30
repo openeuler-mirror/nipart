@@ -89,3 +89,47 @@ pub(crate) fn is_supported_route(
         && SUPPORTED_ROUTE_SCOPE.contains(&message.header.scope)
 }
 
+pub(crate) fn routes_from_messages<'a>(
+    messages: impl IntoIterator<Item = &'a RouteMessage>,
+    index_map: &LinkIndexMap,
+) -> Routes {
+    let mut running = Vec::new();
+    let mut config = Vec::new();
+
+    for message in messages {
+        let protocol = route_protocol_from_netlink(message.header.protocol);
+        if !is_supported_route(message, protocol) {
+            continue;
+        }
+        let is_static_protocol =
+            SUPPORTED_STATIC_ROUTE_PROTOCOL.contains(&protocol);
+
+        if is_multipath(message) {
+            let entries = flat_multipath_route(message, index_map);
+            running.extend(entries.iter().cloned());
+            if is_static_protocol {
+                config.extend(entries);
+            }
+        } else if let Some(route_type) =
+            route_type_from_netlink(message.header.kind)
+        {
+            let entry = route_entry_for_type(message, index_map, route_type);
+            running.push(entry.clone());
+            if is_static_protocol {
+                config.push(entry);
+            }
+        } else if let Some(entry) = route_entry_for_unicast(message, index_map)
+        {
+            running.push(entry.clone());
+            if is_static_protocol {
+                config.push(entry);
+            }
+        }
+    }
+
+    Routes {
+        running: Some(running),
+        config: Some(config),
+    }
+}
+
