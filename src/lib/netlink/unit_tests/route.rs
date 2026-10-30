@@ -107,3 +107,59 @@ fn test_parse_route_default_destination() {
     }
 }
 
+#[test]
+fn test_parse_route_via_attribute() {
+    let mut message = route_message(AddressFamily::Inet6, 64);
+    message.attributes = vec![
+        RouteAttribute::Destination(
+            "2001:db8:1::".parse::<Ipv6Addr>().unwrap().into(),
+        ),
+        RouteAttribute::Oif(2),
+        RouteAttribute::Via(RouteVia::Inet6(
+            "2001:db8::1".parse::<Ipv6Addr>().unwrap(),
+        )),
+    ];
+    let entry = route_entry(&message, &index_map());
+    assert_eq!(entry.next_hop_addr.as_deref(), Some("2001:db8::1"));
+}
+
+#[test]
+fn test_parse_route_metrics_and_flags() {
+    let mut message = route_message(AddressFamily::Inet, 24);
+    message.header.flags.insert(RouteFlags::Onlink);
+    message.attributes = vec![
+        RouteAttribute::Destination(Ipv4Addr::new(198, 51, 100, 0).into()),
+        RouteAttribute::Oif(2),
+        RouteAttribute::PrefSource(Ipv4Addr::new(192, 0, 2, 10).into()),
+        RouteAttribute::Metrics(vec![
+            RouteMetric::Lock(1 << 7),
+            RouteMetric::Cwnd(20),
+            RouteMetric::InitCwnd(10),
+            RouteMetric::InitRwnd(30),
+            RouteMetric::Mtu(1400),
+            RouteMetric::QuickAck(1),
+            RouteMetric::Advmss(1360),
+        ]),
+    ];
+    let entry = route_entry(&message, &index_map());
+    assert_eq!(entry.cwnd, Some(20));
+    assert_eq!(entry.initcwnd, Some(10));
+    assert_eq!(entry.initrwnd, Some(30));
+    assert_eq!(entry.mtu, Some(1400));
+    assert_eq!(entry.quickack, Some(true));
+    assert_eq!(entry.advmss, Some(1360));
+    assert_eq!(entry.onlink, Some(true));
+    assert_eq!(entry.source.as_deref(), Some("192.0.2.10"));
+
+    message.attributes = vec![
+        RouteAttribute::Oif(2),
+        RouteAttribute::Metrics(vec![
+            RouteMetric::Cwnd(20),
+            RouteMetric::QuickAck(0),
+        ]),
+    ];
+    let entry = route_entry(&message, &index_map());
+    assert_eq!(entry.cwnd, None);
+    assert_eq!(entry.quickack, Some(false));
+}
+
