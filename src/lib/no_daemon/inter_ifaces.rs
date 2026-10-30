@@ -272,8 +272,6 @@ async fn apply_ifaces_link_changes(
 async fn apply_ifaces_ip_changes(
     merged_ifaces: &MergedInterfaces,
 ) -> Result<(), NipartError> {
-    let mut np_ifaces: Vec<nispor::IfaceConf> = Vec::new();
-
     for merged_iface in merged_ifaces.kernel_ifaces.values() {
         // Force allow IPv6 router advertisements when autoconf is enabled,
         // so that SLAAC works even when IPv6 forwarding is enabled. IPv6
@@ -294,29 +292,12 @@ async fn apply_ifaces_ip_changes(
             NipartNoDaemon::enable_autoconf(iface_name).await?;
         }
 
-        if let Some(apply_iface) = merged_iface.for_apply.as_ref()
-            && let Some(np_iface) = apply_iface_ip_changes(
+        if let Some(apply_iface) = merged_iface.for_apply.as_ref() {
+            apply_iface_ip_changes(
                 apply_iface.base_iface(),
                 merged_iface.current.as_ref().map(|c| c.base_iface()),
-            )?
-        {
-            np_ifaces.push(np_iface);
-        }
-    }
-    if !np_ifaces.is_empty() {
-        let mut net_conf = nispor::NetConf::default();
-        net_conf.ifaces = Some(np_ifaces);
-
-        log::debug!(
-            "Pending nispor changes {}",
-            serde_json::to_string(&net_conf).unwrap_or_default()
-        );
-
-        if let Err(e) = net_conf.apply_async().await {
-            return Err(NipartError::new(
-                ErrorKind::Bug,
-                format!("Failed to change IP: {e}"),
-            ));
+            )
+            .await?;
         }
     }
 
