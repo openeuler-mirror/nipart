@@ -163,3 +163,104 @@ fn test_parse_route_metrics_and_flags() {
     assert_eq!(entry.quickack, Some(false));
 }
 
+#[test]
+fn test_parse_route_type_entries() {
+    for (kind, expected) in [
+        (RouteType::BlackHole, NipartRouteType::Blackhole),
+        (RouteType::Unreachable, NipartRouteType::Unreachable),
+        (RouteType::Prohibit, NipartRouteType::Prohibit),
+    ] {
+        let mut message = route_message(AddressFamily::Inet, 24);
+        message.header.kind = kind;
+        message.header.protocol = NetlinkRouteProtocol::Boot;
+        message.attributes = vec![RouteAttribute::Destination(
+            Ipv4Addr::new(203, 0, 113, 0).into(),
+        )];
+        let routes = routes_from_messages([&message], &index_map());
+        let running = routes.running.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].route_type, Some(expected));
+        assert_eq!(running[0].next_hop_iface, None);
+        assert_eq!(routes.config.unwrap()[0].route_type, Some(expected));
+
+        message.header.address_family = AddressFamily::Inet6;
+        message.attributes = vec![
+            RouteAttribute::Destination(
+                "2001:db8:2::".parse::<Ipv6Addr>().unwrap().into(),
+            ),
+            RouteAttribute::Oif(3),
+        ];
+        let routes = routes_from_messages([&message], &index_map());
+        let running = routes.running.unwrap();
+        assert_eq!(running[0].route_type, Some(expected));
+        assert_eq!(running[0].next_hop_iface.as_deref(), Some("dummy1"));
+    }
+}
+
+#[test]
+fn test_flatten_multipath_routes() {
+    let mut message = route_message(AddressFamily::Inet, 24);
+    message.header.protocol = NetlinkRouteProtocol::Boot;
+    message.attributes = vec![
+        RouteAttribute::Destination(Ipv4Addr::new(198, 51, 100, 0).into()),
+        RouteAttribute::MultiPath(vec![
+            next_hop(Ipv4Addr::new(192, 0, 2, 1), 2, 1),
+            next_hop(Ipv4Addr::new(192, 0, 2, 2), 3, 3),
+        ]),
+    ];
+    let routes = routes_from_messages([&message], &index_map());
+    let running = routes.running.unwrap();
+    assert_eq!(running.len(), 2);
+    assert_eq!(running[0].next_hop_iface.as_deref(), Some("dummy0"));
+    assert_eq!(running[0].next_hop_addr.as_deref(), Some("192.0.2.1"));
+    assert_eq!(running[0].weight, Some(2));
+    assert_eq!(running[1].next_hop_iface.as_deref(), Some("dummy1"));
+    assert_eq!(running[1].next_hop_addr.as_deref(), Some("192.0.2.2"));
+    assert_eq!(running[1].weight, Some(4));
+    assert_eq!(routes.config.unwrap().len(), 2);
+}
+
+#[test]
+fn test_route_dump_filters() {
+    let mut boot = route_message(AddressFamily::Inet, 24);
+    boot.header.protocol = NetlinkRouteProtocol::Boot;
+    boot.attributes = vec![RouteAttribute::Oif(2)];
+
+    let mut bgp = route_message(AddressFamily::Inet, 24);
+    bgp.header.protocol = NetlinkRouteProtocol::Bgp;
+    bgp.attributes = vec![RouteAttribute::Oif(2)];
+
+    let mut local_table = route_message(AddressFamily::Inet, 24);
+    local_table.attributes =
+        vec![RouteAttribute::Oif(2), RouteAttribute::Table(255)];
+
+    let mut host_scope = route_message(AddressFamily::Inet, 32);
+    host_scope.header.scope = RouteScope::Host;
+    host_scope.attributes = vec![RouteAttribute::Oif(2)];
+
+    let mut link_scope = route_message(AddressFamily::Inet, 24);
+    link_scope.header.scope = RouteScope::Link;
+    link_scope.attributes = vec![RouteAttribute::Oif(2)];
+
+    let mut dhcp = route_message(AddressFamily::Inet, 24);
+    dhcp.header.protocol = NetlinkRouteProtocol::Dhcp;
+    dhcp.attributes = vec![RouteAttribute::Oif(2)];
+
+    let routes = routes_from_messages(
+        [&boot, &bgp, &local_table, &host_scope, &link_scope, &dhcp],
+        &index_map(),
+    );
+    let running = routes.running.unwrap();
+    assert_eq!(running.len(), 3);
+    assert!(running.iter().all(|route| {
+        route.destination.as_deref() == Some("0.0.0.0/0")
+            && route.next_hop_iface.as_deref() == Some("dummy0")
+    }));
+    let config = routes.config.unwrap();
+    assert_eq!(config.len(), 2);
+    assert!(config.iter().all(|route| {
+        route.protocol == Some(RouteProtocol::Boot)
+            || route.protocol == Some(RouteProtocol::Static)
+    }));
+}
+
