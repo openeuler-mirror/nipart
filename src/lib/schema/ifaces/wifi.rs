@@ -143,14 +143,14 @@ impl NipartInterface for WifiPhyInterface {
 
     fn post_merge(
         &mut self,
-        _new: &Self,
+        new: &Self,
         old: &Self,
     ) -> Result<(), NipartError> {
         let merged = self;
         if let Some(wifi) = merged.wifi.as_mut()
             && let Some(old_wifi) = old.wifi.as_ref()
         {
-            wifi.post_merge(old_wifi);
+            wifi.post_merge(new.wifi.as_ref(), old_wifi);
         }
         Ok(())
     }
@@ -425,14 +425,14 @@ impl NipartInterface for WifiCfgInterface {
 
     fn post_merge(
         &mut self,
-        _new: &Self,
+        new: &Self,
         old: &Self,
     ) -> Result<(), NipartError> {
         let merged = self;
         if let Some(wifi) = merged.wifi.as_mut()
             && let Some(old_wifi) = old.wifi.as_ref()
         {
-            wifi.post_merge(old_wifi);
+            wifi.post_merge(new.wifi.as_ref(), old_wifi);
         }
         Ok(())
     }
@@ -562,14 +562,33 @@ impl WifiConfig {
         copy_undefined_value(&mut new_value, &old_value);
 
         let mut merged: Self = serde_json::from_value(new_value)?;
-        merged.post_merge(self);
+        merged.post_merge(Some(new), self);
 
         Ok(merged)
     }
 
-    pub(crate) fn post_merge(&mut self, old: &Self) {
+    pub(crate) fn post_merge(&mut self, new: Option<&Self>, old: &Self) {
+        let ssid_changed =
+            new.is_some_and(|new| !new.ssid.is_empty() && new.ssid != old.ssid);
         if self.ssid.is_empty() {
             self.ssid = old.ssid.to_string();
+        }
+        if ssid_changed {
+            // A different SSID must not inherit the old network's secret or
+            // BSSID pin: the password belongs to the previous SSID and the
+            // pin points at an AP of that SSID. An undefined password stays
+            // undefined so shuli can join an open network, and a hidden
+            // secret marker cannot be resolved for the new SSID.
+            let new_password = new.and_then(|new| new.password.as_deref());
+            if new_password.is_none()
+                || new_password == Some(crate::NetworkState::HIDE_SECRET_STR)
+            {
+                self.password = None;
+            }
+            if new.is_none_or(|new| new.bssid.is_none()) {
+                self.bssid = None;
+            }
+            self.hidden = new.is_some_and(|new| new.hidden);
         }
     }
 }
