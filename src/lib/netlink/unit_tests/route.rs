@@ -357,3 +357,105 @@ fn test_route_del_message_protocol_and_scope() {
     assert_eq!(message.header.protocol, NetlinkRouteProtocol::Unspec);
 }
 
+#[test]
+fn test_route_message_unsupported_properties() {
+    for route in [
+        RouteEntry {
+            destination: Some("198.51.100.0/24".to_string()),
+            table_id: Some(300),
+            ..Default::default()
+        },
+        RouteEntry {
+            destination: Some("198.51.100.0/24".to_string()),
+            weight: Some(2),
+            ..Default::default()
+        },
+        RouteEntry {
+            destination: Some("198.51.100.0/24".to_string()),
+            route_type: Some(NipartRouteType::Blackhole),
+            ..Default::default()
+        },
+        RouteEntry {
+            destination: Some("198.51.100.0/24".to_string()),
+            cwnd: Some(20),
+            ..Default::default()
+        },
+    ] {
+        let error = route_add_message(&route, &index_map()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NoSupport);
+    }
+}
+
+#[test]
+fn test_route_message_unknown_interface() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("missing0".to_string()),
+        ..Default::default()
+    };
+    let error = route_add_message(&route, &index_map()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_route_message_invalid_destination() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/33".to_string()),
+        ..Default::default()
+    };
+    let error = route_add_message(&route, &index_map()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+
+    let route = RouteEntry::default();
+    let error = route_add_message(&route, &index_map()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_route_add_message_default_gateway_address() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        next_hop_addr: Some("0.0.0.0".to_string()),
+        ..Default::default()
+    };
+    let message = route_add_message(&route, &index_map()).unwrap();
+    assert!(message.attributes.contains(&RouteAttribute::Gateway(
+        RouteAddress::Inet(Ipv4Addr::UNSPECIFIED)
+    )));
+}
+
+#[test]
+fn test_route_add_message_invalid_gateway() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        next_hop_addr: Some("not-an-ip".to_string()),
+        ..Default::default()
+    };
+    let error = route_add_message(&route, &index_map()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_route_message_ip_family_mismatch() {
+    let route = RouteEntry {
+        destination: Some("2001:db8:1::/64".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        next_hop_addr: Some("192.0.2.1".to_string()),
+        ..Default::default()
+    };
+    let error = route_add_message(&route, &index_map()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_route_add_message_uses_static_protocol_by_default() {
+    let route = RouteEntry {
+        destination: Some("198.51.100.0/24".to_string()),
+        next_hop_iface: Some("dummy0".to_string()),
+        ..Default::default()
+    };
+    let message = route_add_message(&route, &index_map()).unwrap();
+    assert_eq!(message.header.protocol, NetlinkRouteProtocol::Static);
+}
