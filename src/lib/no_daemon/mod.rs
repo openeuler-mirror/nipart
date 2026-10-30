@@ -24,10 +24,7 @@ mod wireguard;
 use std::collections::HashSet;
 
 #[cfg(test)]
-pub(crate) use self::{
-    base_iface::np_iface_to_base_iface,
-    ip::{np_ipv4_to_nipart, np_ipv6_to_nipart},
-};
+pub(crate) use self::base_iface::np_iface_to_base_iface;
 use crate::InterfaceType;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
