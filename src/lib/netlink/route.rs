@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// This file is based on the work of nispor project
+// (https://github.com/nispor/nispor) and nmstate project
+// (https://nmstate.io/) which are under license of Apache 2.0.
+
+use std::net::IpAddr;
+
+use futures_util::TryStreamExt;
+use rtnetlink::{
+    Handle, RouteMessageBuilder,
+    packet_route::{
+        AddressFamily,
+        route::{
+            RouteAddress, RouteAttribute, RouteFlags, RouteHeader,
+            RouteMessage, RouteMetric, RouteNextHop,
+            RouteProtocol as NetlinkRouteProtocol, RouteScope, RouteType,
+            RouteVia,
+        },
+    },
+};
+
+use crate::{
+    ErrorKind, NipartError, RouteEntry, Routes,
+    netlink::{
+        link::LinkIndexMap, map_rtnetlink_error, new_connection,
+        new_connection_with_strict_check,
+    },
+    schema::RouteProtocol,
+};
+
+pub(crate) const SUPPORTED_ROUTE_SCOPE: [RouteScope; 2] =
+    [RouteScope::Universe, RouteScope::Link];
+
+pub(crate) const SUPPORTED_ROUTE_PROTOCOL: [RouteProtocol; 8] = [
+    // Connected routes created by the kernel when an address is assigned.
+    RouteProtocol::Kernel,
+    RouteProtocol::Boot,
+    RouteProtocol::Static,
+    RouteProtocol::Ra,
+    RouteProtocol::Dhcp,
+    RouteProtocol::Mrouted,
+    RouteProtocol::KeepAlived,
+    RouteProtocol::Babel,
+];
+
+pub(crate) const SUPPORTED_STATIC_ROUTE_PROTOCOL: [RouteProtocol; 2] =
+    [RouteProtocol::Boot, RouteProtocol::Static];
+
+// Table used by the kernel for local and broadcast routes; these are
+// derived from the interface itself and not part of the route config.
+pub(crate) const LOCAL_ROUTE_TABLE: u32 = 255;
+
+const RTAX_CWND: u32 = 7;
+
+const IPV4_DEFAULT_GATEWAY: &str = "0.0.0.0/0";
+const IPV6_DEFAULT_GATEWAY: &str = "::/0";
+const IPV4_EMPTY_NEXT_HOP_ADDRESS: &str = "0.0.0.0";
+const IPV6_EMPTY_NEXT_HOP_ADDRESS: &str = "::";
+
+pub(crate) fn route_protocol_from_netlink(
+    protocol: NetlinkRouteProtocol,
+) -> RouteProtocol {
+    RouteProtocol::from(u8::from(protocol))
+}
+
+pub(crate) fn route_protocol_to_netlink(
+    protocol: RouteProtocol,
+) -> NetlinkRouteProtocol {
+    NetlinkRouteProtocol::from(u8::from(protocol))
+}
+
+pub(crate) fn route_table(message: &RouteMessage) -> u32 {
+    let mut table = u32::from(message.header.table);
+    for attribute in &message.attributes {
+        if let RouteAttribute::Table(value) = attribute {
+            table = *value;
+        }
+    }
+    table
+}
+
