@@ -467,3 +467,188 @@ pub(crate) async fn get_routes(
     Ok(routes_from_messages(&messages, index_map))
 }
 
+fn parse_ip_network(destination: &str) -> Result<(IpAddr, u8), NipartError> {
+    let splits: Vec<&str> = destination.split('/').collect();
+    if splits.len() > 2 || splits.is_empty() {
+        return Err(NipartError::new(
+            ErrorKind::InvalidArgument,
+            format!("Invalid IP network address {destination}"),
+        ));
+    }
+    let address = splits[0].parse::<IpAddr>().map_err(|e| {
+        NipartError::new(
+            ErrorKind::InvalidArgument,
+            format!("Invalid IP network address {destination}: {e}"),
+        )
+    })?;
+    let prefix_length = if let Some(prefix_length) = splits.get(1) {
+        prefix_length.parse::<u8>().map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid IP network prefix {destination}: {e}"),
+            )
+        })?
+    } else if address.is_ipv6() {
+        128
+    } else {
+        32
+    };
+    let max_prefix_length = if address.is_ipv6() { 128 } else { 32 };
+    if prefix_length > max_prefix_length {
+        return Err(NipartError::new(
+            ErrorKind::InvalidArgument,
+            format!(
+                "Invalid IP network prefix {destination}: should be no \
+                 greater than {max_prefix_length}"
+            ),
+        ));
+    }
+    Ok((address, prefix_length))
+}
+
+fn validate_route_for_apply(route: &RouteEntry) -> Result<(), NipartError> {
+    if let Some(table_id) = route.table_id
+        && table_id > u8::MAX.into()
+    {
+        return Err(NipartError::new(
+            ErrorKind::NoSupport,
+            format!(
+                "netlink apply does not support route table ID bigger than {} \
+                 yet, got {table_id}, ignoring",
+                u8::MAX
+            ),
+        ));
+    }
+    if route.weight.is_some() {
+        return Err(NipartError::new(
+            ErrorKind::NoSupport,
+            "netlink apply does not support route weight yet".to_string(),
+        ));
+    }
+    if route.route_type.is_some() {
+        return Err(NipartError::new(
+            ErrorKind::NoSupport,
+            "netlink apply does not support route type yet".to_string(),
+        ));
+    }
+    if route.cwnd.is_some() {
+        return Err(NipartError::new(
+            ErrorKind::NoSupport,
+            "netlink apply does not support route congestion window yet"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn route_add_message(
+    route: &RouteEntry,
+    index_map: &LinkIndexMap,
+) -> Result<RouteMessage, NipartError> {
+    route_message(route, index_map, false)
+}
+
+pub(crate) fn route_del_message(
+    route: &RouteEntry,
+    index_map: &LinkIndexMap,
+) -> Result<RouteMessage, NipartError> {
+    route_message(route, index_map, true)
+}
+
+fn route_message(
+    route: &RouteEntry,
+    index_map: &LinkIndexMap,
+    remove: bool,
+) -> Result<RouteMessage, NipartError> {
+    validate_route_for_apply(route)?;
+
+    let destination = route.destination.as_deref().ok_or_else(|| {
+        NipartError::new(
+            ErrorKind::InvalidArgument,
+            format!("Route {route} has no destination defined"),
+        )
+    })?;
+    let (destination, prefix_length) = parse_ip_network(destination)?;
+    let mut builder = RouteMessageBuilder::<IpAddr>::new()
+        .destination_prefix(destination, prefix_length)
+        .map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!(
+                    "Invalid route destination {destination}/{prefix_length}: \
+                     {e}"
+                ),
+            )
+        })?;
+
+    if remove {
+        builder = builder
+            .protocol(
+                route
+                    .protocol
+                    .map(route_protocol_to_netlink)
+                    .unwrap_or(NetlinkRouteProtocol::Unspec),
+            )
+            .scope(RouteScope::NoWhere)
+            .kind(RouteType::Unspec);
+    } else {
+        builder = builder
+            .protocol(
+                route
+                    .protocol
+                    .map(route_protocol_to_netlink)
+                    .unwrap_or(NetlinkRouteProtocol::Static),
+            )
+            .scope(RouteScope::Universe)
+            .kind(RouteType::Unicast);
+    }
+
+    if let Some(table_id) = route.table_id {
+        builder = builder.table_id(table_id);
+    }
+    if let Some(metric) = route.metric.and_then(|m| u32::try_from(m).ok()) {
+        builder = builder.priority(metric);
+    }
+    if let Some(iface) = route.next_hop_iface.as_deref() {
+        let index = index_map.index(iface).ok_or_else(|| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Interface {iface} does not exist"),
+            )
+        })?;
+        builder = builder.output_interface(index);
+    }
+    if let Some(gateway) = route.next_hop_addr.as_deref() {
+        let gateway = gateway.parse::<IpAddr>().map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid route next hop address {gateway}: {e}"),
+            )
+        })?;
+        builder = builder.gateway(gateway).map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid route next hop address {gateway}: {e}"),
+            )
+        })?;
+    }
+    if let Some(source) = route.source.as_deref() {
+        let source = source.parse::<IpAddr>().map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid route source address {source}: {e}"),
+            )
+        })?;
+        builder = builder.pref_source(source).map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid route source address {source}: {e}"),
+            )
+        })?;
+    }
+    if !remove && route.onlink.unwrap_or_default() {
+        builder = builder.onlink();
+    }
+    Ok(builder.build())
+}
+
