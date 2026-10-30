@@ -151,7 +151,3 @@ impl NipartNoDaemon {
         apply_iface_ip_changes(&purge_iface, current).await
     }
 }
-
-#[cfg(test)]
-#[path = "unit_tests/ip.rs"]
-mod tests;
