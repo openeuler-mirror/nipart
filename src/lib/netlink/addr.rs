@@ -51,7 +51,7 @@ pub(crate) fn ipv4_from_address_infos<'a>(
         if info.address.valid_life_time.as_deref() != Some(FOREVER) {
             dhcp = Some(true);
         }
-        addresses.push(info.address.clone());
+        addresses.push(schema_address(&info.address));
     }
     if addresses.is_empty() {
         return Some(InterfaceIpv4::default());
@@ -83,7 +83,7 @@ pub(crate) fn ipv6_from_address_infos<'a>(
                 autoconf = Some(true);
             }
         }
-        addresses.push(info.address.clone());
+        addresses.push(schema_address(&info.address));
     }
     if addresses.is_empty() {
         return Some(InterfaceIpv6::default());
@@ -100,6 +100,17 @@ pub(crate) fn ipv6_from_address_infos<'a>(
         ip.autoconf = Some(false);
     }
     Some(ip)
+}
+
+fn schema_address(address: &InterfaceIpAddr) -> InterfaceIpAddr {
+    let mut address = address.clone();
+    if address.valid_life_time.as_deref() == Some(FOREVER) {
+        address.valid_life_time = None;
+    }
+    if address.preferred_life_time.as_deref() == Some(FOREVER) {
+        address.preferred_life_time = None;
+    }
+    address
 }
 
 fn ipv4_address_info(message: &AddressMessage) -> Option<AddressInfo> {
