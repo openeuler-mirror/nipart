@@ -8,7 +8,7 @@ use std::{collections::HashMap, net::IpAddr};
 
 use futures_util::TryStreamExt;
 use rtnetlink::{
-    Handle,
+    AddressMessageBuilder, Handle,
     packet_route::{
         AddressFamily,
         address::{
@@ -345,4 +345,81 @@ pub(crate) async fn has_link_local_addr(
             IpAddr::V6(ip) => ip.is_unicast_link_local(),
             IpAddr::V4(_) => false,
         }))
+}
+
+pub(crate) fn address_add_message(
+    index: u32,
+    address: &InterfaceIpAddr,
+    protocol: Option<AddressProtocol>,
+) -> Result<AddressMessage, NipartError> {
+    validate_prefix_length(address)?;
+    let mut message = match address.ip {
+        IpAddr::V4(ip) => AddressMessageBuilder::<std::net::Ipv4Addr>::new()
+            .index(index)
+            .address(ip, address.prefix_length)
+            .build(),
+        IpAddr::V6(ip) => AddressMessageBuilder::<std::net::Ipv6Addr>::new()
+            .index(index)
+            .address(ip, address.prefix_length)
+            .build(),
+    };
+    message
+        .attributes
+        .extend(address_extra_attributes(address, protocol)?);
+    Ok(message)
+}
+
+pub(crate) fn address_del_message(
+    index: u32,
+    address: &InterfaceIpAddr,
+    protocol: Option<AddressProtocol>,
+) -> Result<AddressMessage, NipartError> {
+    validate_prefix_length(address)?;
+    let mut message = AddressMessage::default();
+    message.header.index = index;
+    message.header.prefix_len = address.prefix_length;
+    message.header.family = match address.ip {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    message
+        .attributes
+        .push(AddressAttribute::Address(address.ip));
+    if let Some(protocol) = protocol {
+        message
+            .attributes
+            .push(AddressAttribute::Protocol(protocol));
+    }
+    Ok(message)
+}
+
+pub(crate) fn address_extra_attributes(
+    address: &InterfaceIpAddr,
+    protocol: Option<AddressProtocol>,
+) -> Result<Vec<AddressAttribute>, NipartError> {
+    let mut attributes = Vec::new();
+    if let Some(protocol) = protocol {
+        attributes.push(AddressAttribute::Protocol(protocol));
+    }
+    if let Some(cache_info) = cache_info_from_lifetimes(address)? {
+        attributes.push(AddressAttribute::CacheInfo(cache_info));
+    }
+    Ok(attributes)
+}
+
+fn validate_prefix_length(
+    address: &InterfaceIpAddr,
+) -> Result<(), NipartError> {
+    let max_prefix_length = if address.ip.is_ipv4() { 32 } else { 128 };
+    if address.prefix_length > max_prefix_length {
+        return Err(NipartError::new(
+            ErrorKind::InvalidArgument,
+            format!(
+                "Invalid prefix length {} for address {}, should be no \
+                 greater than {max_prefix_length}",
+                address.prefix_length, address.ip
+            ),
+        ));
+    }
+    Ok(())
 }
