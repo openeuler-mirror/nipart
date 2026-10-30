@@ -131,3 +131,17 @@ fn route_rule_from_message(message: &RuleMessage) -> Option<RouteRuleEntry> {
     Some(rule)
 }
 
+pub(crate) async fn get_route_rules() -> Result<RouteRules, NipartError> {
+    let handle = new_connection().await?;
+    let mut messages = Vec::new();
+    for ip_version in [IpVersion::V6, IpVersion::V4] {
+        let mut stream = handle.rule().get(ip_version).execute();
+        while let Some(message) = stream.try_next().await.map_err(|e| {
+            map_rtnetlink_error("Failed to dump kernel route rules", e)
+        })? {
+            messages.push(message);
+        }
+    }
+    Ok(route_rules_from_messages(&messages))
+}
+
