@@ -286,3 +286,44 @@ fn parse_rule_network(
     Ok((address, prefix_length))
 }
 
+fn is_errno(error: &rtnetlink::Error, errno: nix::errno::Errno) -> bool {
+    matches!(error, rtnetlink::Error::NetlinkError(e)
+        if e.raw_code() == -(errno as i32))
+}
+
+pub(crate) async fn apply_route_rules(
+    rules: &[RouteRuleEntry],
+) -> Result<(), NipartError> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let handle = new_connection().await?;
+    for rule in rules {
+        let remove = rule.is_absent();
+        let message = if remove {
+            route_rule_del_message(rule)?
+        } else {
+            route_rule_add_message(rule)?
+        };
+        log::trace!("Pending kernel route rule change: remove={remove} {rule}");
+        let result = if remove {
+            match handle.rule().del(message).execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_errno(&e, nix::errno::Errno::ENOENT) => Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            let mut request = handle.rule().add();
+            *request.message_mut() = message;
+            match request.execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_errno(&e, nix::errno::Errno::EEXIST) => Ok(()),
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = result {
+            return Err(map_rtnetlink_error("Failed to change route rules", e));
+        }
+    }
+    Ok(())
+}
