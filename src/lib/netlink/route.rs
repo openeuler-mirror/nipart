@@ -240,3 +240,125 @@ pub(crate) fn flat_multipath_route(
     entries
 }
 
+pub(crate) fn route_type_from_netlink(
+    route_type: RouteType,
+) -> Option<crate::RouteType> {
+    match route_type {
+        RouteType::BlackHole => Some(crate::RouteType::Blackhole),
+        RouteType::Unreachable => Some(crate::RouteType::Unreachable),
+        RouteType::Prohibit => Some(crate::RouteType::Prohibit),
+        _ => None,
+    }
+}
+
+fn route_destination(message: &RouteMessage) -> Option<String> {
+    for attribute in &message.attributes {
+        if let RouteAttribute::Destination(destination) = attribute {
+            return route_address_to_string(destination).map(|address| {
+                format!(
+                    "{address}/{}",
+                    message.header.destination_prefix_length
+                )
+            });
+        }
+    }
+    match message.header.address_family {
+        AddressFamily::Inet => Some(IPV4_DEFAULT_GATEWAY.to_string()),
+        AddressFamily::Inet6 => Some(IPV6_DEFAULT_GATEWAY.to_string()),
+        family => {
+            log::warn!(
+                "Route is holding unsupported address family {family:?}"
+            );
+            None
+        }
+    }
+}
+
+fn route_oif(
+    message: &RouteMessage,
+    index_map: &LinkIndexMap,
+) -> Option<String> {
+    for attribute in &message.attributes {
+        if let RouteAttribute::Oif(index) = attribute {
+            return Some(
+                index_map
+                    .name(*index)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| index.to_string()),
+            );
+        }
+    }
+    None
+}
+
+fn route_next_hop_addr(message: &RouteMessage) -> Option<String> {
+    let mut gateway = None;
+    let mut via = None;
+    for attribute in &message.attributes {
+        match attribute {
+            RouteAttribute::Gateway(address) => {
+                gateway = route_address_to_string(address);
+            }
+            RouteAttribute::Via(RouteVia::Inet(address)) => {
+                via = Some(address.to_string());
+            }
+            RouteAttribute::Via(RouteVia::Inet6(address)) => {
+                via = Some(address.to_string());
+            }
+            _ => (),
+        }
+    }
+    via.or(gateway)
+}
+
+fn route_preferred_source(message: &RouteMessage) -> Option<String> {
+    for attribute in &message.attributes {
+        if let RouteAttribute::PrefSource(source) = attribute {
+            return route_address_to_string(source);
+        }
+    }
+    None
+}
+
+fn route_metric(message: &RouteMessage) -> Option<u32> {
+    for attribute in &message.attributes {
+        if let RouteAttribute::Priority(metric) = attribute {
+            return Some(*metric);
+        }
+    }
+    None
+}
+
+fn next_hop_gateway(next_hop: &RouteNextHop) -> Option<String> {
+    for attribute in &next_hop.attributes {
+        if let RouteAttribute::Gateway(address) = attribute {
+            return route_address_to_string(address);
+        }
+    }
+    None
+}
+
+fn route_address_to_string(address: &RouteAddress) -> Option<String> {
+    match address {
+        RouteAddress::Inet(address) => Some(address.to_string()),
+        RouteAddress::Inet6(address) => Some(address.to_string()),
+        address => {
+            log::debug!("Unknown route address {address:?}");
+            None
+        }
+    }
+}
+
+fn empty_next_hop_addr(family: AddressFamily) -> Option<String> {
+    match family {
+        AddressFamily::Inet => Some(IPV4_EMPTY_NEXT_HOP_ADDRESS.to_string()),
+        AddressFamily::Inet6 => Some(IPV6_EMPTY_NEXT_HOP_ADDRESS.to_string()),
+        family => {
+            log::warn!(
+                "Route is holding unsupported address family {family:?}"
+            );
+            None
+        }
+    }
+}
+
