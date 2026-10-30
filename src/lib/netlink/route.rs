@@ -395,3 +395,75 @@ fn route_metrics(message: &RouteMessage) -> RouteMetrics {
     metrics
 }
 
+fn route_dump_message(
+    family: AddressFamily,
+    protocol: NetlinkRouteProtocol,
+) -> RouteMessage {
+    let mut message = RouteMessage::default();
+    message.header.address_family = family;
+    message.header.protocol = protocol;
+    message.header.scope = RouteScope::Universe;
+    message.header.kind = RouteType::Unspec;
+    message.header.table = RouteHeader::RT_TABLE_MAIN;
+    message.attributes.push(RouteAttribute::Table(0));
+    message
+}
+
+async fn dump_protocol_routes(
+    handle: &Handle,
+    family: AddressFamily,
+    protocol: RouteProtocol,
+) -> Result<Vec<RouteMessage>, NipartError> {
+    let mut messages = Vec::new();
+    let mut stream = handle
+        .route()
+        .get(route_dump_message(
+            family,
+            route_protocol_to_netlink(protocol),
+        ))
+        .execute();
+    while let Some(message) = stream
+        .try_next()
+        .await
+        .map_err(|e| map_rtnetlink_error("Failed to dump kernel routes", e))?
+    {
+        // Always filter in user space: the kernel only applies the protocol
+        // filter with NETLINK_GET_STRICT_CHK enabled.
+        if route_protocol_from_netlink(message.header.protocol) == protocol {
+            messages.push(message);
+        }
+    }
+    Ok(messages)
+}
+
+pub(crate) async fn get_routes(
+    index_map: &LinkIndexMap,
+) -> Result<Routes, NipartError> {
+    let handle = match new_connection_with_strict_check().await {
+        Ok(handle) => handle,
+        Err(e) => {
+            log::debug!(
+                "Failed to create strict rtnetlink connection, falling back \
+                 to user space route filtering: {e}"
+            );
+            new_connection().await?
+        }
+    };
+
+    let mut messages = Vec::new();
+    for protocol in SUPPORTED_ROUTE_PROTOCOL {
+        for family in [AddressFamily::Inet6, AddressFamily::Inet] {
+            match dump_protocol_routes(&handle, family, protocol).await {
+                Ok(new_messages) => messages.extend(new_messages),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to retrieve {protocol:?} route via netlink: \
+                         {e}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(routes_from_messages(&messages, index_map))
+}
+
