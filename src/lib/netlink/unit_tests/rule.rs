@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use rtnetlink::packet_route::{
+    AddressFamily,
+    route::RouteHeader,
+    rule::{RuleAction, RuleAttribute, RuleHeader, RuleMessage},
+};
+
+use crate::{
+    AddressFamily as NipartAddressFamily, ErrorKind, RouteRuleAction,
+    RouteRuleEntry, RouteRuleState,
+    netlink::rule::{
+        route_rule_add_message, route_rule_del_message,
+        route_rules_from_messages,
+    },
+};
+
+fn rule_message(family: AddressFamily, action: RuleAction) -> RuleMessage {
+    let mut message = RuleMessage::default();
+    message.header = RuleHeader {
+        family,
+        action,
+        table: 100,
+        ..Default::default()
+    };
+    message
+}
+
+#[test]
+fn test_route_rule_parse_ipv4() {
+    let mut message = rule_message(AddressFamily::Inet, RuleAction::ToTable);
+    message.header.src_len = 24;
+    message.header.dst_len = 24;
+    message.attributes = vec![
+        RuleAttribute::Source("192.0.2.0".parse().unwrap()),
+        RuleAttribute::Destination("198.51.100.0".parse().unwrap()),
+        RuleAttribute::Priority(1000),
+        RuleAttribute::FwMark(123),
+        RuleAttribute::FwMask(255),
+        RuleAttribute::Iifname("dummy0".to_string()),
+        RuleAttribute::SuppressPrefixLen(10),
+        RuleAttribute::Protocol(
+            rtnetlink::packet_route::route::RouteProtocol::Boot,
+        ),
+    ];
+    let rules = route_rules_from_messages([&message]);
+    let rules = rules.config.unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].family, Some(NipartAddressFamily::Ipv4));
+    assert_eq!(rules[0].action, None);
+    assert_eq!(rules[0].ip_from.as_deref(), Some("192.0.2.0/24"));
+    assert_eq!(rules[0].ip_to.as_deref(), Some("198.51.100.0/24"));
+    assert_eq!(rules[0].table_id, Some(100));
+    assert_eq!(rules[0].priority, Some(1000));
+    assert_eq!(rules[0].fwmark, Some(123));
+    assert_eq!(rules[0].fwmask, Some(255));
+    assert_eq!(rules[0].iif.as_deref(), Some("dummy0"));
+    assert_eq!(rules[0].suppress_prefix_length, Some(10));
+}
+
+#[test]
+fn test_route_rule_parse_ipv6_actions() {
+    for (action, expected) in [
+        (RuleAction::Blackhole, RouteRuleAction::Blackhole),
+        (RuleAction::Unreachable, RouteRuleAction::Unreachable),
+        (RuleAction::Prohibit, RouteRuleAction::Prohibit),
+    ] {
+        let mut message = rule_message(AddressFamily::Inet6, action);
+        message.attributes = vec![RuleAttribute::Priority(2000)];
+        let rules = route_rules_from_messages([&message]);
+        let rules = rules.config.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].family, Some(NipartAddressFamily::Ipv6));
+        assert_eq!(rules[0].action, Some(expected));
+        assert_eq!(rules[0].priority, Some(2000));
+    }
+}
+
+#[test]
+fn test_route_rule_parse_table_attribute() {
+    let mut message = rule_message(AddressFamily::Inet, RuleAction::ToTable);
+    message.header.table = RouteHeader::RT_TABLE_UNSPEC;
+    message.attributes =
+        vec![RuleAttribute::Table(1000), RuleAttribute::Priority(1000)];
+    let rules = route_rules_from_messages([&message]);
+    assert_eq!(rules.config.unwrap()[0].table_id, Some(1000));
+
+    message.attributes = vec![RuleAttribute::Priority(1000)];
+    let rules = route_rules_from_messages([&message]);
+    assert_eq!(rules.config.unwrap()[0].table_id, None);
+}
+
+#[test]
+fn test_route_rule_parse_unsupported_action() {
+    for action in [RuleAction::Goto, RuleAction::Nop, RuleAction::Unspec] {
+        let message = rule_message(AddressFamily::Inet, action);
+        let rules = route_rules_from_messages([&message]);
+        assert!(rules.config.unwrap().is_empty());
+    }
+}
+
+#[test]
+fn test_route_rule_parse_protocol_filter() {
+    let mut message = rule_message(AddressFamily::Inet, RuleAction::ToTable);
+    message.attributes = vec![RuleAttribute::Protocol(
+        rtnetlink::packet_route::route::RouteProtocol::Bgp,
+    )];
+    let rules = route_rules_from_messages([&message]);
+    assert!(rules.config.unwrap().is_empty());
+
+    message.attributes = vec![RuleAttribute::Protocol(
+        rtnetlink::packet_route::route::RouteProtocol::Boot,
+    )];
+    let rules = route_rules_from_messages([&message]);
+    assert_eq!(rules.config.unwrap().len(), 1);
+
+    message.attributes = vec![RuleAttribute::Priority(1000)];
+    let rules = route_rules_from_messages([&message]);
+    assert_eq!(rules.config.unwrap().len(), 1);
+}
+
+#[test]
+fn test_route_rule_parse_suppress_max_ignored() {
+    let mut message = rule_message(AddressFamily::Inet, RuleAction::ToTable);
+    message.attributes = vec![RuleAttribute::SuppressPrefixLen(u32::MAX)];
+    let rules = route_rules_from_messages([&message]);
+    assert_eq!(rules.config.unwrap()[0].suppress_prefix_length, None);
+}
+
+#[test]
+fn test_route_rule_parse_sorts_and_dedups() {
+    let message = rule_message(AddressFamily::Inet, RuleAction::ToTable);
+    let duplicate = message.clone();
+    let rules = route_rules_from_messages([&message, &duplicate]);
+    assert_eq!(rules.config.unwrap().len(), 1);
+}
+
