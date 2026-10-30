@@ -652,3 +652,49 @@ fn route_message(
     Ok(builder.build())
 }
 
+fn is_errno(error: &rtnetlink::Error, errno: nix::errno::Errno) -> bool {
+    matches!(error, rtnetlink::Error::NetlinkError(e)
+        if e.raw_code() == -(errno as i32))
+}
+
+pub(crate) async fn apply_routes(
+    routes: &[RouteEntry],
+) -> Result<(), NipartError> {
+    if routes.is_empty() {
+        return Ok(());
+    }
+    let handle = new_connection().await?;
+    let index_map = crate::netlink::link::get_index_map(&handle).await?;
+
+    for route in routes {
+        let remove = route.is_absent();
+        let message = if remove {
+            route_del_message(route, &index_map)?
+        } else {
+            route_add_message(route, &index_map)?
+        };
+        log::trace!(
+            "Pending kernel route change: remove={remove} destination={:?} \
+             table={:?}",
+            route.destination,
+            route.table_id
+        );
+        let result = if remove {
+            match handle.route().del(message).execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_errno(&e, nix::errno::Errno::ESRCH) => Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            match handle.route().add(message).execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_errno(&e, nix::errno::Errno::EEXIST) => Ok(()),
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = result {
+            return Err(map_rtnetlink_error("Failed to change routes", e));
+        }
+    }
+    Ok(())
+}
