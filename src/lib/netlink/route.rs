@@ -362,3 +362,36 @@ fn empty_next_hop_addr(family: AddressFamily) -> Option<String> {
     }
 }
 
+#[derive(Debug, Default)]
+struct RouteMetrics {
+    lock: Option<u32>,
+    cwnd: Option<u32>,
+    initcwnd: Option<u32>,
+    initrwnd: Option<u32>,
+    mtu: Option<u32>,
+    quickack: Option<u32>,
+    advmss: Option<u32>,
+}
+
+fn route_metrics(message: &RouteMessage) -> RouteMetrics {
+    let mut metrics = RouteMetrics::default();
+    for attribute in &message.attributes {
+        let RouteAttribute::Metrics(nlas) = attribute else {
+            continue;
+        };
+        for nla in nlas {
+            match nla {
+                RouteMetric::Lock(value) => metrics.lock = Some(*value),
+                RouteMetric::Cwnd(value) => metrics.cwnd = Some(*value),
+                RouteMetric::InitCwnd(value) => metrics.initcwnd = Some(*value),
+                RouteMetric::InitRwnd(value) => metrics.initrwnd = Some(*value),
+                RouteMetric::Mtu(value) => metrics.mtu = Some(*value),
+                RouteMetric::QuickAck(value) => metrics.quickack = Some(*value),
+                RouteMetric::Advmss(value) => metrics.advmss = Some(*value),
+                _ => log::debug!("Unknown RTA_METRICS message {nla:?}"),
+            }
+        }
+    }
+    metrics
+}
+
