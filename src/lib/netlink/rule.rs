@@ -31,3 +31,19 @@ const SUPPORTED_STATIC_ROUTE_RULE_PROTOCOL: [NetlinkRouteProtocol; 3] = [
     NetlinkRouteProtocol::Unspec,
 ];
 
+pub(crate) fn route_rules_from_messages<'a>(
+    messages: impl IntoIterator<Item = &'a RuleMessage>,
+) -> RouteRules {
+    let mut rules = Vec::new();
+    for message in messages {
+        let Some(rule) = route_rule_from_message(message) else {
+            continue;
+        };
+        rules.push(rule);
+    }
+    rules.sort_unstable();
+    rules.dedup();
+    RouteRules {
+        config: Some(rules),
+    }
+}
