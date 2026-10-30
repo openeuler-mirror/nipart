@@ -202,3 +202,41 @@ pub(crate) fn route_entry_for_type(
     entry
 }
 
+pub(crate) fn is_multipath(message: &RouteMessage) -> bool {
+    message.attributes.iter().any(|attribute| {
+        matches!(attribute, RouteAttribute::MultiPath(next_hops)
+            if !next_hops.is_empty())
+    })
+}
+
+pub(crate) fn flat_multipath_route(
+    message: &RouteMessage,
+    index_map: &LinkIndexMap,
+) -> Vec<RouteEntry> {
+    let mut entries = Vec::new();
+    for attribute in &message.attributes {
+        let RouteAttribute::MultiPath(next_hops) = attribute else {
+            continue;
+        };
+        for next_hop in next_hops {
+            let mut entry = route_entry(message, index_map);
+            entry.next_hop_iface = Some(
+                index_map
+                    .name(next_hop.interface_index)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| next_hop.interface_index.to_string()),
+            );
+            entry.next_hop_addr = Some(
+                next_hop_gateway(next_hop)
+                    .map(|gateway| gateway.to_string())
+                    .unwrap_or_default(),
+            );
+            if message.header.address_family == AddressFamily::Inet {
+                entry.weight = Some(u16::from(next_hop.hops) + 1);
+            }
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
