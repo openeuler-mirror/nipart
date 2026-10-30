@@ -133,3 +133,72 @@ pub(crate) fn routes_from_messages<'a>(
     }
 }
 
+fn route_entry_for_unicast(
+    message: &RouteMessage,
+    index_map: &LinkIndexMap,
+) -> Option<RouteEntry> {
+    let entry = route_entry(message, index_map);
+    entry.next_hop_iface.as_ref()?;
+    Some(entry)
+}
+
+pub(crate) fn route_entry(
+    message: &RouteMessage,
+    index_map: &LinkIndexMap,
+) -> RouteEntry {
+    let metrics = route_metrics(message);
+    let next_hop_addr = route_next_hop_addr(message)
+        .or_else(|| empty_next_hop_addr(message.header.address_family));
+
+    RouteEntry {
+        destination: route_destination(message),
+        next_hop_iface: route_oif(message, index_map),
+        next_hop_addr,
+        source: route_preferred_source(message),
+        metric: route_metric(message).map(i64::from),
+        table_id: Some(route_table(message)),
+        cwnd: if metrics.lock.unwrap_or_default() & (1 << RTAX_CWND) != 0 {
+            metrics.cwnd
+        } else {
+            None
+        },
+        initcwnd: metrics.initcwnd,
+        initrwnd: metrics.initrwnd,
+        mtu: metrics.mtu,
+        quickack: metrics.quickack.map(|quickack| quickack > 0),
+        advmss: metrics.advmss,
+        onlink: message
+            .header
+            .flags
+            .contains(RouteFlags::Onlink)
+            .then_some(true),
+        protocol: Some(route_protocol_from_netlink(message.header.protocol)),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn route_entry_for_type(
+    message: &RouteMessage,
+    index_map: &LinkIndexMap,
+    route_type: crate::RouteType,
+) -> RouteEntry {
+    let metrics = route_metrics(message);
+    let mut entry = RouteEntry {
+        destination: route_destination(message),
+        metric: route_metric(message).map(i64::from),
+        table_id: Some(route_table(message)),
+        cwnd: if metrics.lock.unwrap_or_default() & (1 << RTAX_CWND) != 0 {
+            metrics.cwnd
+        } else {
+            None
+        },
+        route_type: Some(route_type),
+        protocol: Some(route_protocol_from_netlink(message.header.protocol)),
+        ..Default::default()
+    };
+    if message.header.address_family == AddressFamily::Inet6 {
+        entry.next_hop_iface = route_oif(message, index_map);
+    }
+    entry
+}
+
