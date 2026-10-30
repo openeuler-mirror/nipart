@@ -4,18 +4,23 @@
 // (https://github.com/nispor/nispor) and nmstate project
 // (https://nmstate.io/) which are under license of Apache 2.0.
 
-use std::net::IpAddr;
+use std::{collections::HashMap, net::IpAddr};
 
-use rtnetlink::packet_route::{
-    AddressFamily,
-    address::{
-        AddressAttribute, AddressFlags, AddressMessage, AddressProtocol,
-        CacheInfo,
+use futures_util::TryStreamExt;
+use rtnetlink::{
+    Handle,
+    packet_route::{
+        AddressFamily,
+        address::{
+            AddressAttribute, AddressFlags, AddressMessage, AddressProtocol,
+            CacheInfo,
+        },
     },
 };
 
 use crate::{
     ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6, NipartError,
+    netlink::{map_rtnetlink_error, new_connection},
 };
 
 const FOREVER: &str = "forever";
@@ -258,4 +263,25 @@ fn parse_lifetime(
                 format!("Invalid {name} format: expect format 50sec, got {value}: {e}"),
             )
         })
+}
+
+pub(crate) async fn get_address_messages()
+-> Result<Vec<AddressMessage>, NipartError> {
+    let handle = new_connection().await?;
+    dump_address_messages(&handle).await
+}
+
+async fn dump_address_messages(
+    handle: &Handle,
+) -> Result<Vec<AddressMessage>, NipartError> {
+    let mut messages = Vec::new();
+    let mut stream = handle.address().get().execute();
+    while let Some(message) = stream
+        .try_next()
+        .await
+        .map_err(|e| map_rtnetlink_error("Failed to dump kernel addresses", e))?
+    {
+        messages.push(message);
+    }
+    Ok(messages)
 }
