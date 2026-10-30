@@ -467,3 +467,161 @@ fn test_address_add_message_permanent_lifetime_has_no_cache_info() {
             .any(|attribute| matches!(attribute, AddressAttribute::CacheInfo(_)))
     );
 }
+
+fn iface_with_ipv4(ipv4: InterfaceIpv4) -> crate::BaseInterface {
+    let mut iface = crate::BaseInterface::new(
+        "eth0".to_string(),
+        crate::InterfaceType::Ethernet,
+    );
+    iface.ipv4 = Some(ipv4);
+    iface
+}
+
+fn iface_with_ipv6(ipv6: InterfaceIpv6) -> crate::BaseInterface {
+    let mut iface = crate::BaseInterface::new(
+        "eth0".to_string(),
+        crate::InterfaceType::Ethernet,
+    );
+    iface.ipv6 = Some(ipv6);
+    iface
+}
+
+fn addr(ip: &str, prefix_length: u8) -> crate::InterfaceIpAddr {
+    crate::InterfaceIpAddr::new(ip.parse().unwrap(), prefix_length)
+}
+
+#[test]
+fn test_ipv6_link_local_not_removed_when_enabled() {
+    let des_iface = iface_with_ipv6(InterfaceIpv6 {
+        enabled: Some(true),
+        dhcp: Some(true),
+        addresses: None,
+        ..Default::default()
+    });
+    let cur_iface = iface_with_ipv6(InterfaceIpv6 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("fe80::1", 64),
+            addr("2001:db8::1", 64),
+        ]),
+        ..Default::default()
+    });
+
+    let actions = crate::netlink::addr::ip_address_actions(
+        &des_iface,
+        Some(&cur_iface),
+    );
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].remove);
+    assert_eq!(actions[0].address.ip, "2001:db8::1".parse::<IpAddr>().unwrap());
+}
+
+#[test]
+fn test_ipv6_link_local_removed_when_disabled() {
+    let des_iface = iface_with_ipv6(InterfaceIpv6 {
+        enabled: Some(false),
+        ..Default::default()
+    });
+    let cur_iface = iface_with_ipv6(InterfaceIpv6 {
+        enabled: Some(true),
+        addresses: Some(vec![addr("fe80::1", 64)]),
+        ..Default::default()
+    });
+
+    let actions = crate::netlink::addr::ip_address_actions(
+        &des_iface,
+        Some(&cur_iface),
+    );
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].remove);
+    assert_eq!(actions[0].address.ip, "fe80::1".parse::<IpAddr>().unwrap());
+}
+
+#[test]
+fn test_ipv4_appending_only_adds_new_address() {
+    let des_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.10", 24),
+            addr("192.0.2.11", 24),
+            addr("192.0.2.12", 24),
+        ]),
+        ..Default::default()
+    });
+    let cur_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.10", 24),
+            addr("192.0.2.11", 24),
+        ]),
+        ..Default::default()
+    });
+
+    let actions = crate::netlink::addr::ip_address_actions(
+        &des_iface,
+        Some(&cur_iface),
+    );
+    assert_eq!(actions.len(), 1);
+    assert!(!actions[0].remove);
+    assert_eq!(
+        actions[0].address.ip,
+        "192.0.2.12".parse::<IpAddr>().unwrap()
+    );
+}
+
+#[test]
+fn test_ipv4_replacing_keeps_all_addresses() {
+    let des_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.12", 24),
+            addr("192.0.2.10", 24),
+        ]),
+        ..Default::default()
+    });
+    let cur_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.10", 24),
+            addr("192.0.2.12", 24),
+        ]),
+        ..Default::default()
+    });
+
+    let actions = crate::netlink::addr::ip_address_actions(
+        &des_iface,
+        Some(&cur_iface),
+    );
+    assert_eq!(actions.len(), 2);
+    assert!(actions.iter().all(|action| !action.remove));
+}
+
+#[test]
+fn test_ipv4_reordering_purges_then_adds() {
+    let des_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.12", 24),
+            addr("192.0.2.11", 24),
+        ]),
+        ..Default::default()
+    });
+    let cur_iface = iface_with_ipv4(InterfaceIpv4 {
+        enabled: Some(true),
+        addresses: Some(vec![
+            addr("192.0.2.10", 24),
+            addr("192.0.2.11", 24),
+        ]),
+        ..Default::default()
+    });
+
+    let actions = crate::netlink::addr::ip_address_actions(
+        &des_iface,
+        Some(&cur_iface),
+    );
+    assert_eq!(actions.len(), 4);
+    assert!(actions[0].remove);
+    assert!(actions[1].remove);
+    assert!(!actions[2].remove);
+    assert!(!actions[3].remove);
+}
