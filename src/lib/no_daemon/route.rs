@@ -10,367 +10,35 @@
 use std::collections::HashMap;
 
 use crate::{
-    ErrorKind, Interfaces, MergedRoutes, NipartError, RouteEntry, RouteType,
-    Routes, schema::RouteProtocol,
+    ErrorKind, Interfaces, MergedRoutes, NipartError, NipartInterface,
+    RouteEntry, Routes,
+    netlink::{
+        link::LinkIndexMap,
+        route::{
+            apply_routes as netlink_apply_routes,
+            get_routes as netlink_get_routes,
+        },
+    },
 };
 
-const SUPPORTED_ROUTE_SCOPE: [nispor::RouteScope; 2] =
-    [nispor::RouteScope::Universe, nispor::RouteScope::Link];
-
-const SUPPORTED_ROUTE_PROTOCOL: [nispor::RouteProtocol; 8] = [
-    // Connected routes created by the kernel when an address is assigned.
-    nispor::RouteProtocol::Kernel,
-    nispor::RouteProtocol::Boot,
-    nispor::RouteProtocol::Static,
-    nispor::RouteProtocol::Ra,
-    nispor::RouteProtocol::Dhcp,
-    nispor::RouteProtocol::Mrouted,
-    nispor::RouteProtocol::KeepAlived,
-    nispor::RouteProtocol::Babel,
-];
-
-const SUPPORTED_STATIC_ROUTE_PROTOCOL: [nispor::RouteProtocol; 2] =
-    [nispor::RouteProtocol::Boot, nispor::RouteProtocol::Static];
-
-// Table used by the kernel for local and broadcast routes; these are
-// derived from the interface itself and not part of the route config.
-const LOCAL_ROUTE_TABLE: u32 = 255;
-
-const IPV4_DEFAULT_GATEWAY: &str = "0.0.0.0/0";
-const IPV6_DEFAULT_GATEWAY: &str = "::/0";
-const IPV4_EMPTY_NEXT_HOP_ADDRESS: &str = "0.0.0.0";
-const IPV6_EMPTY_NEXT_HOP_ADDRESS: &str = "::";
-
-// kernel values
-const RTAX_CWND: u32 = 7;
-
-fn np_route_protocol_to_nipart(
-    protocol: nispor::RouteProtocol,
-) -> RouteProtocol {
-    match protocol {
-        nispor::RouteProtocol::Unspec => RouteProtocol::Unspec,
-        nispor::RouteProtocol::IcmpRedirect => RouteProtocol::IcmpRedirect,
-        nispor::RouteProtocol::Kernel => RouteProtocol::Kernel,
-        nispor::RouteProtocol::Boot => RouteProtocol::Boot,
-        nispor::RouteProtocol::Static => RouteProtocol::Static,
-        nispor::RouteProtocol::Gated => RouteProtocol::Gated,
-        nispor::RouteProtocol::Ra => RouteProtocol::Ra,
-        nispor::RouteProtocol::Mrt => RouteProtocol::Mrt,
-        nispor::RouteProtocol::Zebra => RouteProtocol::Zebra,
-        nispor::RouteProtocol::Bird => RouteProtocol::Bird,
-        nispor::RouteProtocol::DnRouted => RouteProtocol::DnRouted,
-        nispor::RouteProtocol::Xorp => RouteProtocol::Xorp,
-        nispor::RouteProtocol::Ntk => RouteProtocol::Ntk,
-        nispor::RouteProtocol::Dhcp => RouteProtocol::Dhcp,
-        nispor::RouteProtocol::Mrouted => RouteProtocol::Mrouted,
-        nispor::RouteProtocol::KeepAlived => RouteProtocol::KeepAlived,
-        nispor::RouteProtocol::Babel => RouteProtocol::Babel,
-        nispor::RouteProtocol::Bgp => RouteProtocol::Bgp,
-        nispor::RouteProtocol::Isis => RouteProtocol::Isis,
-        nispor::RouteProtocol::Ospf => RouteProtocol::Ospf,
-        nispor::RouteProtocol::Rip => RouteProtocol::Rip,
-        nispor::RouteProtocol::Eigrp => RouteProtocol::Eigrp,
-        nispor::RouteProtocol::Other(value) => RouteProtocol::Other(value),
-        _ => RouteProtocol::Unspec,
+pub(crate) async fn get_routes(ifaces: &Interfaces) -> Routes {
+    let mut index_map = LinkIndexMap::default();
+    for iface in ifaces.iter() {
+        let base_iface = iface.base_iface();
+        if let Some(index) = base_iface.iface_index {
+            index_map.insert(index, base_iface.name.clone());
+        }
     }
-}
-
-fn nipart_route_protocol_to_nispor(
-    protocol: RouteProtocol,
-) -> nispor::RouteProtocol {
-    match protocol {
-        RouteProtocol::Unspec => nispor::RouteProtocol::Unspec,
-        RouteProtocol::IcmpRedirect => nispor::RouteProtocol::IcmpRedirect,
-        RouteProtocol::Kernel => nispor::RouteProtocol::Kernel,
-        RouteProtocol::Boot => nispor::RouteProtocol::Boot,
-        RouteProtocol::Static => nispor::RouteProtocol::Static,
-        RouteProtocol::Gated => nispor::RouteProtocol::Gated,
-        RouteProtocol::Ra => nispor::RouteProtocol::Ra,
-        RouteProtocol::Mrt => nispor::RouteProtocol::Mrt,
-        RouteProtocol::Zebra => nispor::RouteProtocol::Zebra,
-        RouteProtocol::Bird => nispor::RouteProtocol::Bird,
-        RouteProtocol::DnRouted => nispor::RouteProtocol::DnRouted,
-        RouteProtocol::Xorp => nispor::RouteProtocol::Xorp,
-        RouteProtocol::Ntk => nispor::RouteProtocol::Ntk,
-        RouteProtocol::Dhcp => nispor::RouteProtocol::Dhcp,
-        RouteProtocol::Mrouted => nispor::RouteProtocol::Mrouted,
-        RouteProtocol::KeepAlived => nispor::RouteProtocol::KeepAlived,
-        RouteProtocol::Babel => nispor::RouteProtocol::Babel,
-        RouteProtocol::Bgp => nispor::RouteProtocol::Bgp,
-        RouteProtocol::Isis => nispor::RouteProtocol::Isis,
-        RouteProtocol::Ospf => nispor::RouteProtocol::Ospf,
-        RouteProtocol::Rip => nispor::RouteProtocol::Rip,
-        RouteProtocol::Eigrp => nispor::RouteProtocol::Eigrp,
-        RouteProtocol::Other(value) => nispor::RouteProtocol::Other(value),
-    }
-}
-
-pub(crate) async fn get_routes(_ifaces: &Interfaces) -> Routes {
-    let mut ret = Routes::default();
-    let mut np_routes: Vec<nispor::Route> = Vec::new();
-    let route_type = [
-        nispor::RouteType::BlackHole,
-        nispor::RouteType::Unreachable,
-        nispor::RouteType::Prohibit,
-    ];
-
-    for protocol in &SUPPORTED_ROUTE_PROTOCOL {
-        let mut rt_filter = nispor::NetStateRouteFilter::default();
-        rt_filter.protocol = Some(*protocol);
-        let mut filter = nispor::NetStateFilter::minimum();
-        filter.route = Some(rt_filter);
-        match nispor::NetState::retrieve_with_filter_async(&filter).await {
-            Ok(np_state) => {
-                for np_rt in np_state.routes {
-                    np_routes.push(np_rt);
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to retrieve {protocol:?} route via nispor: {e}"
-                );
+    match netlink_get_routes(&index_map).await {
+        Ok(routes) => routes,
+        Err(e) => {
+            log::warn!("Failed to retrieve routes via netlink: {e}");
+            Routes {
+                running: Some(Vec::new()),
+                config: Some(Vec::new()),
             }
         }
     }
-
-    let mut running_routes = Vec::new();
-    for np_route in np_routes.iter().filter(|np_route| {
-        np_route.table != LOCAL_ROUTE_TABLE
-            && SUPPORTED_ROUTE_SCOPE.contains(&np_route.scope)
-    }) {
-        if is_multipath(np_route) {
-            for route in flat_multipath_route(np_route) {
-                running_routes.push(route);
-            }
-        } else if route_type.contains(&np_route.route_type) {
-            running_routes.push(np_routetype_to_nipart(np_route));
-        } else if np_route.oif.is_some() {
-            running_routes.push(np_route_to_nipart(np_route));
-        }
-    }
-    ret.running = Some(running_routes);
-
-    let mut config_routes = Vec::new();
-    for np_route in np_routes.iter().filter(|np_route| {
-        np_route.table != LOCAL_ROUTE_TABLE
-            && SUPPORTED_ROUTE_SCOPE.contains(&np_route.scope)
-            && SUPPORTED_STATIC_ROUTE_PROTOCOL.contains(&np_route.protocol)
-    }) {
-        if is_multipath(np_route) {
-            for route in flat_multipath_route(np_route) {
-                config_routes.push(route);
-            }
-        } else if route_type.contains(&np_route.route_type) {
-            config_routes.push(np_routetype_to_nipart(np_route));
-        } else if np_route.oif.is_some() {
-            config_routes.push(np_route_to_nipart(np_route));
-        }
-    }
-    ret.config = Some(config_routes);
-    ret
-}
-
-pub(crate) fn np_routetype_to_nipart(np_route: &nispor::Route) -> RouteEntry {
-    let destination = match &np_route.dst {
-        Some(dst) => Some(dst.to_string()),
-        None => match np_route.address_family {
-            nispor::AddressFamily::Ipv4 => {
-                Some(IPV4_DEFAULT_GATEWAY.to_string())
-            }
-            nispor::AddressFamily::Ipv6 => {
-                Some(IPV6_DEFAULT_GATEWAY.to_string())
-            }
-            _ => {
-                log::warn!(
-                    "Route {:?} is holding unknown IP family {:?}",
-                    np_route,
-                    np_route.address_family
-                );
-                None
-            }
-        },
-    };
-
-    let mut route_entry = RouteEntry {
-        destination,
-        metric: np_route.metric.map(i64::from),
-        table_id: Some(np_route.table),
-        cwnd: if np_route.lock.unwrap_or(0) & (1 << RTAX_CWND) != 0 {
-            np_route.cwnd
-        } else {
-            None
-        },
-        protocol: Some(np_route_protocol_to_nipart(np_route.protocol)),
-        ..Default::default()
-    };
-    if np_route.address_family == nispor::AddressFamily::Ipv6 {
-        route_entry.next_hop_iface = np_route.oif.as_ref().cloned();
-    }
-    match np_route.route_type {
-        nispor::RouteType::BlackHole => {
-            route_entry.route_type = Some(RouteType::Blackhole)
-        }
-        nispor::RouteType::Unreachable => {
-            route_entry.route_type = Some(RouteType::Unreachable)
-        }
-        nispor::RouteType::Prohibit => {
-            route_entry.route_type = Some(RouteType::Prohibit)
-        }
-        _ => {
-            log::debug!("Got unsupported route {np_route:?}");
-        }
-    }
-    // according to `man ip-route`, cwnd is useless without the lock flag, so
-    // we require both cwnd and its lock flag to consider cwnd as set.
-
-    route_entry
-}
-
-pub(crate) fn np_route_to_nipart(np_route: &nispor::Route) -> RouteEntry {
-    let destination = match &np_route.dst {
-        Some(dst) => Some(dst.to_string()),
-        None => match np_route.address_family {
-            nispor::AddressFamily::Ipv4 => {
-                Some(IPV4_DEFAULT_GATEWAY.to_string())
-            }
-            nispor::AddressFamily::Ipv6 => {
-                Some(IPV6_DEFAULT_GATEWAY.to_string())
-            }
-            _ => {
-                log::warn!(
-                    "Route {:?} is holding unknown IP family {:?}",
-                    np_route,
-                    np_route.address_family
-                );
-                None
-            }
-        },
-    };
-
-    let next_hop_addr = if let Some(via) = &np_route.via {
-        Some(via.to_string())
-    } else if let Some(gateway) = &np_route.gateway {
-        Some(gateway.to_string())
-    } else {
-        match np_route.address_family {
-            nispor::AddressFamily::Ipv4 => {
-                Some(IPV4_EMPTY_NEXT_HOP_ADDRESS.to_string())
-            }
-            nispor::AddressFamily::Ipv6 => {
-                Some(IPV6_EMPTY_NEXT_HOP_ADDRESS.to_string())
-            }
-            _ => {
-                log::warn!(
-                    "Route {:?} is holding unknown IP family {:?}",
-                    np_route,
-                    np_route.address_family
-                );
-                None
-            }
-        }
-    };
-
-    let source = np_route.prefered_src.as_ref().map(|src| src.to_string());
-    RouteEntry {
-        destination,
-        next_hop_iface: np_route.oif.as_ref().cloned(),
-        next_hop_addr,
-        source,
-        metric: np_route.metric.map(i64::from),
-        table_id: Some(np_route.table),
-        cwnd: if np_route.lock.unwrap_or(0) & (1 << RTAX_CWND) != 0 {
-            np_route.cwnd
-        } else {
-            None
-        },
-        initcwnd: np_route.initcwnd,
-        initrwnd: np_route.initrwnd,
-        mtu: np_route.mtu,
-        quickack: np_route.quickack.map(|q| q > 0),
-        advmss: np_route.advmss,
-        onlink: if np_route.flags.contains(&nispor::RouteFlag::Onlink) {
-            Some(true)
-        } else {
-            None
-        },
-        protocol: Some(np_route_protocol_to_nipart(np_route.protocol)),
-        ..Default::default()
-    }
-}
-
-fn is_multipath(np_route: &nispor::Route) -> bool {
-    np_route
-        .multipath
-        .as_ref()
-        .map(|m| !m.is_empty())
-        .unwrap_or_default()
-}
-
-fn flat_multipath_route(np_route: &nispor::Route) -> Vec<RouteEntry> {
-    let mut ret: Vec<RouteEntry> = Vec::new();
-    if let Some(mpath_routes) = np_route.multipath.as_ref() {
-        for mp_route in mpath_routes {
-            let mut new_np_route = np_route.clone();
-            new_np_route.via = Some(mp_route.via.to_string());
-            new_np_route.oif = Some(mp_route.iface.to_string());
-            let mut route = np_route_to_nipart(&new_np_route);
-            if np_route.address_family == nispor::AddressFamily::Ipv4 {
-                route.weight = Some(mp_route.weight);
-            }
-            ret.push(route);
-        }
-    }
-    ret
-}
-
-fn nipart_to_nispor_route_conf(
-    nipart_rt: &RouteEntry,
-) -> Result<nispor::RouteConf, NipartError> {
-    let mut ret = nispor::RouteConf::default();
-
-    ret.remove = nipart_rt.is_absent();
-    ret.dst = nipart_rt.destination.clone().unwrap_or_default();
-    ret.oif.clone_from(&nipart_rt.next_hop_iface);
-    ret.via.clone_from(&nipart_rt.next_hop_addr);
-    ret.metric = nipart_rt.metric.and_then(|m| u32::try_from(m).ok());
-    ret.onlink = nipart_rt.onlink.unwrap_or_default();
-    ret.protocol = nipart_rt.protocol.map(nipart_route_protocol_to_nispor);
-    if let Some(table_id) = nipart_rt.table_id {
-        if table_id > u8::MAX.into() {
-            return Err(NipartError::new(
-                ErrorKind::NoSupport,
-                format!(
-                    "nispor apply does not support route table ID bigger than \
-                     {} yet, got {}, ignoring",
-                    u8::MAX,
-                    table_id
-                ),
-            ));
-        } else {
-            ret.table = Some(table_id as u8);
-        }
-    }
-    if nipart_rt.weight.is_some() {
-        return Err(NipartError::new(
-            ErrorKind::NoSupport,
-            "nispor apply does not support route weight yet".into(),
-        ));
-    }
-
-    if nipart_rt.route_type.is_some() {
-        return Err(NipartError::new(
-            ErrorKind::NoSupport,
-            "nispor apply does not support route type yet".into(),
-        ));
-    }
-
-    if nipart_rt.cwnd.is_some() {
-        return Err(NipartError::new(
-            ErrorKind::NoSupport,
-            "nispor apply does not support route congestion window yet".into(),
-        ));
-    }
-    Ok(ret)
 }
 
 pub(crate) async fn apply_routes(
@@ -381,29 +49,7 @@ pub(crate) async fn apply_routes(
         return Ok(());
     }
     validate_routes(merged_routes)?;
-    let mut np_route_confs = Vec::new();
-    for nipart_rt in merged_routes.changed_routes.as_slice() {
-        np_route_confs.push(nipart_to_nispor_route_conf(nipart_rt)?)
-    }
-
-    if !np_route_confs.is_empty() {
-        let mut net_conf = nispor::NetConf::default();
-        net_conf.routes = Some(np_route_confs);
-        log::trace!(
-            "Pending kernel route changes {}",
-            serde_json::to_string(&net_conf).unwrap_or_default()
-        );
-        if let Err(e) = net_conf.apply_async().await {
-            return Err(NipartError::new(
-                ErrorKind::Bug,
-                format!("Failed to change routes: {e}"),
-            ));
-        }
-    } else {
-        log::trace!("No route changes");
-    }
-
-    Ok(())
+    netlink_apply_routes(&merged_routes.changed_routes).await
 }
 
 fn validate_routes(merged_routes: &MergedRoutes) -> Result<(), NipartError> {
