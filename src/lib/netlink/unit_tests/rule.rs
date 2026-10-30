@@ -211,3 +211,56 @@ fn test_route_rule_add_message_ipv6() {
     assert!(message.attributes.contains(&RuleAttribute::Table(1000)));
 }
 
+#[test]
+fn test_route_rule_del_message_wildcard() {
+    let rule = RouteRuleEntry {
+        state: Some(RouteRuleState::Absent),
+        ip_from: Some("192.0.2.0/24".to_string()),
+        priority: Some(1000),
+        ..Default::default()
+    };
+    let message = route_rule_del_message(&rule).unwrap();
+    assert_eq!(message.header.action, RuleAction::ToTable);
+    assert_eq!(message.header.table, RouteHeader::RT_TABLE_MAIN);
+    assert!(
+        message
+            .attributes
+            .contains(&RuleAttribute::Source("192.0.2.0".parse().unwrap()))
+    );
+    assert!(message.attributes.contains(&RuleAttribute::Priority(1000)));
+}
+
+#[test]
+fn test_route_rule_message_validation() {
+    let rule = RouteRuleEntry {
+        ip_from: Some("192.0.2.0/24".to_string()),
+        ..Default::default()
+    };
+    let error = route_rule_add_message(&rule).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+
+    let rule = RouteRuleEntry {
+        ip_from: Some("192.0.2.0/24".to_string()),
+        priority: Some(-1),
+        ..Default::default()
+    };
+    let error = route_rule_add_message(&rule).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+
+    let rule = RouteRuleEntry {
+        family: Some(NipartAddressFamily::Ipv6),
+        ip_from: Some("192.0.2.0/24".to_string()),
+        priority: Some(1000),
+        ..Default::default()
+    };
+    let error = route_rule_add_message(&rule).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+
+    let rule = RouteRuleEntry {
+        ip_from: Some("192.0.2.0/33".to_string()),
+        priority: Some(1000),
+        ..Default::default()
+    };
+    let error = route_rule_add_message(&rule).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+}
