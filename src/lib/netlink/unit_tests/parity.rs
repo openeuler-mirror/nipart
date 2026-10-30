@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{BaseInterface, no_daemon};
+use crate::{BaseInterface, InterfaceIpv4, InterfaceIpv6, no_daemon};
 
 pub(super) fn nispor_iface_from_json(json: &str) -> nispor::Iface {
     serde_json::from_str(json).expect("Invalid nispor Iface fixture")
