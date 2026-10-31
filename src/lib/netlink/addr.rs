@@ -20,7 +20,9 @@ use rtnetlink::{
 
 use crate::{
     ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6, NipartError,
-    netlink::{map_rtnetlink_error, new_connection},
+    netlink::{
+        link::get_index_map, map_rtnetlink_error, new_connection,
+    },
 };
 
 const FOREVER: &str = "forever";
@@ -324,4 +326,23 @@ async fn dump_address_messages(
         messages.push(message);
     }
     Ok(messages)
+}
+
+pub(crate) async fn has_link_local_addr(
+    iface_name: &str,
+) -> Result<bool, NipartError> {
+    let handle = new_connection().await?;
+    let index_map = get_index_map(&handle).await?;
+    let Some(index) = index_map.index(iface_name) else {
+        return Ok(false);
+    };
+    let messages = dump_address_messages(&handle).await?;
+    Ok(messages
+        .iter()
+        .filter(|message| message.header.index == index)
+        .filter_map(address_info)
+        .any(|info| match info.address.ip {
+            IpAddr::V6(ip) => ip.is_unicast_link_local(),
+            IpAddr::V4(_) => false,
+        }))
 }

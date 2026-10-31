@@ -12,7 +12,10 @@ use rtnetlink::{
     },
 };
 
-use crate::{ErrorKind, NipartError, NipartNoDaemon};
+use crate::{
+    ErrorKind, NipartError, NipartNoDaemon,
+    netlink::addr::has_link_local_addr,
+};
 
 const LINK_CARRIER_QUERY_INTERVAL_SEC: u64 = 30;
 
@@ -96,27 +99,6 @@ impl NipartNoDaemon {
         }
         Ok(())
     }
-}
-
-async fn has_link_local_addr(iface_name: &str) -> Result<bool, NipartError> {
-    let mut filter = nispor::NetStateFilter::minimum();
-    let mut iface_filter = nispor::NetStateIfaceFilter::default();
-    iface_filter.iface_name = Some(iface_name.to_string());
-    filter.iface = Some(iface_filter);
-    let np_state =
-        nispor::NetState::retrieve_with_filter_async(&filter).await?;
-    if let Some(np_iface) = np_state.ifaces.get(iface_name)
-        && let Some(np_ip) = np_iface.ipv6.as_ref()
-    {
-        for np_addr in &np_ip.addresses {
-            if let Ok(ip) = np_addr.address.parse::<std::net::Ipv6Addr>()
-                && ip.is_unicast_link_local()
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 async fn wait_link_carrier(
