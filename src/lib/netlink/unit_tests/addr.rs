@@ -311,3 +311,38 @@ fn test_empty_address_lists_are_disabled() {
         ipv6_from_address_infos(std::iter::empty()).unwrap();
     assert_eq!(ipv6.enabled, Some(false));
 }
+
+#[test]
+fn test_address_maps_group_by_interface() {
+    let mut message = ipv4_message(vec![
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(
+            192, 0, 2, 10,
+        ))),
+        cache_info(u32::MAX, u32::MAX),
+    ]);
+    let mut second = ipv6_message(
+        64,
+        vec![
+            AddressAttribute::Address(IpAddr::V6(
+                "2001:db8::10".parse::<Ipv6Addr>().unwrap(),
+            )),
+            cache_info(u32::MAX, u32::MAX),
+        ],
+    );
+    second.header.index = 4;
+    message.header.index = 3;
+
+    let messages = vec![message, second];
+    let ipv4_map = crate::netlink::addr::ipv4_map_from_messages(&messages);
+    let ipv6_map = crate::netlink::addr::ipv6_map_from_messages(&messages);
+    assert_eq!(ipv4_map.len(), 1);
+    assert_eq!(
+        ipv4_map[&3].addresses.as_ref().unwrap()[0].ip,
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
+    );
+    assert_eq!(ipv6_map.len(), 1);
+    assert_eq!(
+        ipv6_map[&4].addresses.as_ref().unwrap()[0].ip,
+        IpAddr::V6("2001:db8::10".parse::<Ipv6Addr>().unwrap())
+    );
+}

@@ -107,6 +107,46 @@ pub(crate) fn ipv6_from_address_infos<'a>(
     Some(ip)
 }
 
+pub(crate) fn ipv4_map_from_messages(
+    messages: &[AddressMessage],
+) -> HashMap<u32, InterfaceIpv4> {
+    let mut grouped: HashMap<u32, Vec<AddressInfo>> = HashMap::new();
+    for info in messages.iter().filter_map(address_info) {
+        if info.address.ip.is_ipv4() {
+            grouped.entry(info.iface_index).or_default().push(info);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(index, infos)| {
+            (
+                index,
+                ipv4_from_address_infos(&infos).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn ipv6_map_from_messages(
+    messages: &[AddressMessage],
+) -> HashMap<u32, InterfaceIpv6> {
+    let mut grouped: HashMap<u32, Vec<AddressInfo>> = HashMap::new();
+    for info in messages.iter().filter_map(address_info) {
+        if info.address.ip.is_ipv6() {
+            grouped.entry(info.iface_index).or_default().push(info);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(index, infos)| {
+            (
+                index,
+                ipv6_from_address_infos(&infos).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
 fn schema_address(address: &InterfaceIpAddr) -> InterfaceIpAddr {
     let mut address = address.clone();
     if address.valid_life_time.as_deref() == Some(FOREVER) {
