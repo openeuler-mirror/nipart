@@ -7,6 +7,8 @@
 use std::{collections::HashMap, net::IpAddr};
 
 use futures_util::TryStreamExt;
+#[cfg(test)]
+use rtnetlink::AddressMessageBuilder;
 use rtnetlink::{
     Handle,
     packet_route::{
@@ -18,15 +20,10 @@ use rtnetlink::{
     },
 };
 
-#[cfg(test)]
-use rtnetlink::AddressMessageBuilder;
-
 use crate::{
     BaseInterface, ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6,
     NipartError,
-    netlink::{
-        link::get_index_map, map_rtnetlink_error, new_connection,
-    },
+    netlink::{link::get_index_map, map_rtnetlink_error, new_connection},
 };
 
 const FOREVER: &str = "forever";
@@ -125,10 +122,7 @@ pub(crate) fn ipv4_map_from_messages(
     grouped
         .into_iter()
         .map(|(index, infos)| {
-            (
-                index,
-                ipv4_from_address_infos(&infos).unwrap_or_default(),
-            )
+            (index, ipv4_from_address_infos(&infos).unwrap_or_default())
         })
         .collect()
 }
@@ -145,10 +139,7 @@ pub(crate) fn ipv6_map_from_messages(
     grouped
         .into_iter()
         .map(|(index, infos)| {
-            (
-                index,
-                ipv6_from_address_infos(&infos).unwrap_or_default(),
-            )
+            (index, ipv6_from_address_infos(&infos).unwrap_or_default())
         })
         .collect()
 }
@@ -272,10 +263,8 @@ pub(crate) fn cache_info_from_lifetimes(
         "preferred-life-time",
         address.preferred_life_time.as_deref(),
     )?;
-    cache_info.ifa_valid = parse_lifetime(
-        "valid-life-time",
-        address.valid_life_time.as_deref(),
-    )?;
+    cache_info.ifa_valid =
+        parse_lifetime("valid-life-time", address.valid_life_time.as_deref())?;
     Ok(Some(cache_info))
 }
 
@@ -283,10 +272,7 @@ fn is_forever(life_time: Option<&str>) -> bool {
     matches!(life_time, None | Some("") | Some(FOREVER))
 }
 
-fn parse_lifetime(
-    name: &str,
-    value: Option<&str>,
-) -> Result<u32, NipartError> {
+fn parse_lifetime(name: &str, value: Option<&str>) -> Result<u32, NipartError> {
     let Some(value) = value else {
         return Ok(u32::MAX);
     };
@@ -298,14 +284,19 @@ fn parse_lifetime(
         .ok_or_else(|| {
             NipartError::new(
                 ErrorKind::InvalidArgument,
-                format!("Invalid {name} format: expect format 50sec, got {value}"),
+                format!(
+                    "Invalid {name} format: expect format 50sec, got {value}"
+                ),
             )
         })?
         .parse::<u32>()
         .map_err(|e| {
             NipartError::new(
                 ErrorKind::InvalidArgument,
-                format!("Invalid {name} format: expect format 50sec, got {value}: {e}"),
+                format!(
+                    "Invalid {name} format: expect format 50sec, got {value}: \
+                     {e}"
+                ),
             )
         })
 }
@@ -321,11 +312,9 @@ async fn dump_address_messages(
 ) -> Result<Vec<AddressMessage>, NipartError> {
     let mut messages = Vec::new();
     let mut stream = handle.address().get().execute();
-    while let Some(message) = stream
-        .try_next()
-        .await
-        .map_err(|e| map_rtnetlink_error("Failed to dump kernel addresses", e))?
-    {
+    while let Some(message) = stream.try_next().await.map_err(|e| {
+        map_rtnetlink_error("Failed to dump kernel addresses", e)
+    })? {
         messages.push(message);
     }
     Ok(messages)
@@ -525,11 +514,8 @@ async fn apply_address_actions(
 ) -> Result<(), NipartError> {
     for action in actions {
         if action.remove {
-            let message = address_del_message(
-                index,
-                &action.address,
-                action.protocol,
-            )?;
+            let message =
+                address_del_message(index, &action.address, action.protocol)?;
             log::trace!(
                 "Removing IP address {}/{} from interface index {index}",
                 action.address.ip,
@@ -537,8 +523,7 @@ async fn apply_address_actions(
             );
             match handle.address().del(message).execute().await {
                 Ok(()) => (),
-                Err(e)
-                    if is_errno(&e, nix::errno::Errno::EADDRNOTAVAIL) => (),
+                Err(e) if is_errno(&e, nix::errno::Errno::EADDRNOTAVAIL) => (),
                 Err(e) => {
                     return Err(map_rtnetlink_error(
                         "Failed to remove IP address",
@@ -554,11 +539,7 @@ async fn apply_address_actions(
             );
             let mut request = handle
                 .address()
-                .add(
-                    index,
-                    action.address.ip,
-                    action.address.prefix_length,
-                )
+                .add(index, action.address.ip, action.address.prefix_length)
                 .replace();
             request
                 .message_mut()
@@ -568,10 +549,7 @@ async fn apply_address_actions(
                     action.protocol,
                 )?);
             if let Err(e) = request.execute().await {
-                return Err(map_rtnetlink_error(
-                    "Failed to add IP address",
-                    e,
-                ));
+                return Err(map_rtnetlink_error("Failed to add IP address", e));
             }
         }
     }

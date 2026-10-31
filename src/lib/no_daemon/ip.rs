@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) use crate::netlink::addr::apply_iface_ip_changes;
 use crate::{
     BaseInterface, InterfaceIpv4, InterfaceIpv6, NipartError, NipartNoDaemon,
 };
-
-pub(crate) use crate::netlink::addr::apply_iface_ip_changes;
 
 impl NipartNoDaemon {
     /// Purge all IPv4 and IPv6 addresses from the interface.

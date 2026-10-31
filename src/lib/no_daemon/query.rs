@@ -4,15 +4,15 @@ use super::{
     base_iface::np_iface_to_base_iface, route::get_routes,
     route_rule::get_route_rules,
 };
-use crate::netlink::addr::{
-    get_address_messages, ipv4_map_from_messages, ipv6_map_from_messages,
-};
 use crate::{
     BondInterface, DummyInterface, ErrorKind, EthernetInterface, Interface,
     InterfaceType, LinuxBridgeInterface, LoopbackInterface, NetworkState,
     NipartError, NipartInterface, NipartNoDaemon, NipartQueryOption,
     OvsInterface, UnknownInterface, VlanInterface, VrfInterface,
     VxlanInterface, WifiPhyInterface, WireguardInterface,
+    netlink::addr::{
+        get_address_messages, ipv4_map_from_messages, ipv6_map_from_messages,
+    },
 };
 
 impl NipartNoDaemon {
