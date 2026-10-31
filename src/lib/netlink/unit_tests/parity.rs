@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{BaseInterface, InterfaceIpv4, InterfaceIpv6, no_daemon};
+use crate::{BaseInterface, no_daemon};
 
 pub(super) fn nispor_iface_from_json(json: &str) -> nispor::Iface {
     serde_json::from_str(json).expect("Invalid nispor Iface fixture")
@@ -11,14 +11,6 @@ pub(super) fn base_iface_from_nispor_json(json: &str) -> BaseInterface {
     iface.ipv4 = Some(InterfaceIpv4::default());
     iface.ipv6 = Some(InterfaceIpv6::default());
     iface
-}
-
-pub(super) fn ipv4_from_nispor_json(json: &str) -> Option<InterfaceIpv4> {
-    no_daemon::np_ipv4_to_nipart(&nispor_iface_from_json(json))
-}
-
-pub(super) fn ipv6_from_nispor_json(json: &str) -> Option<InterfaceIpv6> {
-    no_daemon::np_ipv6_to_nipart(&nispor_iface_from_json(json))
 }
 
 #[cfg(test)]
