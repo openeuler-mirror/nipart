@@ -279,17 +279,7 @@ impl NipartNoDaemon {
 
         // Apply directly to kernel without going through the schema sanitize()
         // which drops dynamic (auto) IPv6 addresses from desired state.
-        if let Some(np_iface) = apply_iface_ip_changes(&apply_base_iface, None)?
-        {
-            let mut net_conf = nispor::NetConf::default();
-            net_conf.ifaces = Some(vec![np_iface]);
-            if let Err(e) = net_conf.apply_async().await {
-                return Err(NipartError::new(
-                    ErrorKind::Bug,
-                    format!("Failed to apply DHCPv6 lease address: {e}"),
-                ));
-            }
-        }
+        apply_iface_ip_changes(&apply_base_iface, None).await?;
         Ok(())
     }
 }
@@ -337,19 +327,11 @@ async fn apply_lease_v4(
         apply_base_iface.mtu = Some(mtu.into());
     }
 
-    if let Some(np_iface) = apply_iface_ip_changes(
+    apply_iface_ip_changes(
         &apply_base_iface,
         merged_iface.current.as_ref().map(|c| c.base_iface()),
-    )? {
-        let mut net_conf = nispor::NetConf::default();
-        net_conf.ifaces = Some(vec![np_iface]);
-        if let Err(e) = net_conf.apply_async().await {
-            return Err(NipartError::new(
-                ErrorKind::Bug,
-                format!("Failed to apply DHCP IP address: {e}"),
-            ));
-        }
-    }
+    )
+    .await?;
 
     let mut conf_routes: Vec<RouteEntry> = Vec::new();
     // TODO: Handle multiple addresses of router
