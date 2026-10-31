@@ -264,17 +264,16 @@ pub(crate) fn cache_info_from_lifetimes(
     {
         return Ok(None);
     }
-    Ok(Some(CacheInfo {
-        ifa_preferred: parse_lifetime(
-            "preferred-life-time",
-            address.preferred_life_time.as_deref(),
-        )?,
-        ifa_valid: parse_lifetime(
-            "valid-life-time",
-            address.valid_life_time.as_deref(),
-        )?,
-        ..Default::default()
-    }))
+    let mut cache_info = CacheInfo::default();
+    cache_info.ifa_preferred = parse_lifetime(
+        "preferred-life-time",
+        address.preferred_life_time.as_deref(),
+    )?;
+    cache_info.ifa_valid = parse_lifetime(
+        "valid-life-time",
+        address.valid_life_time.as_deref(),
+    )?;
+    Ok(Some(cache_info))
 }
 
 fn is_forever(life_time: Option<&str>) -> bool {
@@ -347,8 +346,6 @@ pub(crate) async fn has_link_local_addr(
             IpAddr::V4(_) => false,
         }))
 }
-
-#[cfg(test)]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddressAction {
@@ -583,6 +580,7 @@ fn is_errno(error: &rtnetlink::Error, errno: nix::errno::Errno) -> bool {
         if e.raw_code() == -(errno as i32))
 }
 
+#[cfg(test)]
 pub(crate) fn address_add_message(
     index: u32,
     address: &InterfaceIpAddr,

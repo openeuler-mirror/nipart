@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{net::IpAddr, str::FromStr};
+use std::str::FromStr;
 
 use crate::{
     BaseInterface, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6, NipartError,
     NipartNoDaemon,
-    netlink::addr::apply_iface_ip_changes,
 };
+
+pub(crate) use crate::netlink::addr::apply_iface_ip_changes;
 
 pub(crate) fn np_ipv4_to_nipart(
     np_iface: &nispor::Iface,
