@@ -8,10 +8,17 @@ use std::net::IpAddr;
 
 use rtnetlink::packet_route::{
     AddressFamily,
-    address::{AddressAttribute, AddressFlags, AddressMessage, AddressProtocol},
+    address::{
+        AddressAttribute, AddressFlags, AddressMessage, AddressProtocol,
+        CacheInfo,
+    },
 };
 
-use crate::{InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6};
+use crate::{
+    ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6, NipartError,
+};
+
+const FOREVER: &str = "forever";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddressInfo {
@@ -129,15 +136,92 @@ fn address_info_for(
     ip: IpAddr,
     prefix_length: u8,
 ) -> AddressInfo {
+    let mut valid_life_time = String::new();
+    let mut preferred_life_time = String::new();
+    let mut protocol = None;
+    let mut flags = AddressFlags::empty();
+    for attribute in &message.attributes {
+        match attribute {
+            AddressAttribute::CacheInfo(cache_info) => {
+                valid_life_time = lifetime_to_string(cache_info.ifa_valid);
+                preferred_life_time =
+                    lifetime_to_string(cache_info.ifa_preferred);
+            }
+            AddressAttribute::Protocol(value) => protocol = Some(*value),
+            AddressAttribute::Flags(value) => flags = *value,
+            _ => (),
+        }
+    }
+
     AddressInfo {
         iface_index: message.header.index,
         address: InterfaceIpAddr {
             ip,
             prefix_length,
-            valid_life_time: None,
-            preferred_life_time: None,
+            valid_life_time: Some(valid_life_time),
+            preferred_life_time: Some(preferred_life_time),
         },
-        protocol: None,
-        flags: AddressFlags::empty(),
+        protocol,
+        flags,
     }
+}
+
+pub(crate) fn lifetime_to_string(left_time: u32) -> String {
+    if left_time == u32::MAX {
+        FOREVER.to_string()
+    } else {
+        format!("{left_time}sec")
+    }
+}
+
+pub(crate) fn cache_info_from_lifetimes(
+    address: &InterfaceIpAddr,
+) -> Result<Option<CacheInfo>, NipartError> {
+    if is_forever(address.valid_life_time.as_deref())
+        && is_forever(address.preferred_life_time.as_deref())
+    {
+        return Ok(None);
+    }
+    Ok(Some(CacheInfo {
+        ifa_preferred: parse_lifetime(
+            "preferred-life-time",
+            address.preferred_life_time.as_deref(),
+        )?,
+        ifa_valid: parse_lifetime(
+            "valid-life-time",
+            address.valid_life_time.as_deref(),
+        )?,
+        ..Default::default()
+    }))
+}
+
+fn is_forever(life_time: Option<&str>) -> bool {
+    matches!(life_time, None | Some("") | Some(FOREVER))
+}
+
+fn parse_lifetime(
+    name: &str,
+    value: Option<&str>,
+) -> Result<u32, NipartError> {
+    let Some(value) = value else {
+        return Ok(u32::MAX);
+    };
+    if value.is_empty() || value == FOREVER {
+        return Ok(u32::MAX);
+    }
+    value
+        .strip_suffix("sec")
+        .ok_or_else(|| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid {name} format: expect format 50sec, got {value}"),
+            )
+        })?
+        .parse::<u32>()
+        .map_err(|e| {
+            NipartError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid {name} format: expect format 50sec, got {value}: {e}"),
+            )
+        })
 }
