@@ -43,40 +43,63 @@ pub(crate) fn ipv4_from_address_infos<'a>(
     infos: impl IntoIterator<Item = &'a AddressInfo>,
 ) -> Option<InterfaceIpv4> {
     let mut addresses = Vec::new();
+    let mut dhcp = None;
     for info in infos {
-        if info.address.ip.is_ipv4() {
-            addresses.push(info.address.clone());
+        if !info.address.ip.is_ipv4() {
+            continue;
         }
+        if info.address.valid_life_time.as_deref() != Some(FOREVER) {
+            dhcp = Some(true);
+        }
+        addresses.push(info.address.clone());
     }
     if addresses.is_empty() {
-        Some(InterfaceIpv4::default())
-    } else {
-        Some(InterfaceIpv4 {
-            enabled: Some(true),
-            addresses: Some(addresses),
-            ..Default::default()
-        })
+        return Some(InterfaceIpv4::default());
     }
+    Some(InterfaceIpv4 {
+        enabled: Some(true),
+        dhcp: Some(dhcp.unwrap_or(false)),
+        addresses: Some(addresses),
+        ..Default::default()
+    })
 }
 
 pub(crate) fn ipv6_from_address_infos<'a>(
     infos: impl IntoIterator<Item = &'a AddressInfo>,
 ) -> Option<InterfaceIpv6> {
     let mut addresses = Vec::new();
+    let mut dhcp = None;
+    let mut autoconf = None;
     for info in infos {
-        if info.address.ip.is_ipv6() {
-            addresses.push(info.address.clone());
+        if !info.address.ip.is_ipv6() {
+            continue;
         }
+        if info.protocol == Some(AddressProtocol::RouterAnnouncement) {
+            autoconf = Some(true);
+        } else if info.address.valid_life_time.as_deref() != Some(FOREVER) {
+            if info.address.prefix_length == 128 {
+                dhcp = Some(true);
+            } else {
+                autoconf = Some(true);
+            }
+        }
+        addresses.push(info.address.clone());
     }
     if addresses.is_empty() {
-        Some(InterfaceIpv6::default())
-    } else {
-        Some(InterfaceIpv6 {
-            enabled: Some(true),
-            addresses: Some(addresses),
-            ..Default::default()
-        })
+        return Some(InterfaceIpv6::default());
     }
+    let mut ip = InterfaceIpv6 {
+        enabled: Some(true),
+        dhcp,
+        autoconf,
+        addresses: Some(addresses),
+        ..Default::default()
+    };
+    if ip.autoconf.is_none() && ip.dhcp.is_none() {
+        ip.dhcp = Some(false);
+        ip.autoconf = Some(false);
+    }
+    Some(ip)
 }
 
 fn ipv4_address_info(message: &AddressMessage) -> Option<AddressInfo> {
