@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod addr;
 pub(crate) mod link;
 mod mac;
 pub(crate) mod route;
