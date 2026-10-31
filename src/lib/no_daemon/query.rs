@@ -4,6 +4,9 @@ use super::{
     base_iface::np_iface_to_base_iface, route::get_routes,
     route_rule::get_route_rules,
 };
+use crate::netlink::addr::{
+    get_address_messages, ipv4_map_from_messages, ipv6_map_from_messages,
+};
 use crate::{
     BondInterface, DummyInterface, ErrorKind, EthernetInterface, Interface,
     InterfaceType, LinuxBridgeInterface, LoopbackInterface, NetworkState,
@@ -34,6 +37,18 @@ impl NipartNoDaemon {
         filter.route = None;
         let np_state =
             nispor::NetState::retrieve_with_filter_async(&filter).await?;
+        let address_messages = match get_address_messages().await {
+            Ok(messages) => messages,
+            Err(e) => {
+                log::warn!(
+                    "Failed to retrieve addresses via netlink, falling back \
+                     to disabled IP state: {e}"
+                );
+                Vec::new()
+            }
+        };
+        let mut ipv4_map = ipv4_map_from_messages(&address_messages);
+        let mut ipv6_map = ipv6_map_from_messages(&address_messages);
 
         for np_iface in np_state.ifaces.values() {
             // The `ovs-system` is reserved for OVS kernel datapath
@@ -49,7 +64,12 @@ impl NipartNoDaemon {
                 continue;
             }
 
-            let base_iface = np_iface_to_base_iface(np_iface);
+            let mut base_iface = np_iface_to_base_iface(np_iface);
+            let iface_index = base_iface.iface_index.unwrap_or(np_iface.index);
+            base_iface.ipv4 =
+                Some(ipv4_map.remove(&iface_index).unwrap_or_default());
+            base_iface.ipv6 =
+                Some(ipv6_map.remove(&iface_index).unwrap_or_default());
             let iface = match &base_iface.iface_type {
                 InterfaceType::Ethernet | InterfaceType::Veth => {
                     Interface::Ethernet(Box::new(
