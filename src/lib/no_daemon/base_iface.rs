@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    iface::nipart_iface_state_to_nispor,
-    ip::{np_ipv4_to_nipart, np_ipv6_to_nipart},
-};
+use super::iface::nipart_iface_state_to_nispor;
 use crate::{
     AltNameEntry, BaseInterface, InterfaceLinkState, InterfaceState,
     InterfaceType, NipartError,
@@ -133,9 +130,6 @@ pub(crate) fn np_iface_to_base_iface(
         );
         base_iface.state = InterfaceState::Ignore;
     }
-    base_iface.ipv4 = np_ipv4_to_nipart(np_iface);
-    base_iface.ipv6 = np_ipv6_to_nipart(np_iface);
-
     base_iface
 }
 

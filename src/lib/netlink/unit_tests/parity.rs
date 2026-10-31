@@ -7,7 +7,10 @@ pub(super) fn nispor_iface_from_json(json: &str) -> nispor::Iface {
 }
 
 pub(super) fn base_iface_from_nispor_json(json: &str) -> BaseInterface {
-    no_daemon::np_iface_to_base_iface(&nispor_iface_from_json(json))
+    let mut iface = no_daemon::np_iface_to_base_iface(&nispor_iface_from_json(json));
+    iface.ipv4 = Some(InterfaceIpv4::default());
+    iface.ipv6 = Some(InterfaceIpv6::default());
+    iface
 }
 
 pub(super) fn ipv4_from_nispor_json(json: &str) -> Option<InterfaceIpv4> {
