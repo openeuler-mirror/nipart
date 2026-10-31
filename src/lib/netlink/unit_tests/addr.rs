@@ -40,11 +40,10 @@ fn ipv6_message(
 }
 
 fn cache_info(preferred: u32, valid: u32) -> AddressAttribute {
-    AddressAttribute::CacheInfo(CacheInfo {
-        ifa_preferred: preferred,
-        ifa_valid: valid,
-        ..Default::default()
-    })
+    let mut cache_info = CacheInfo::default();
+    cache_info.ifa_preferred = preferred;
+    cache_info.ifa_valid = valid;
+    AddressAttribute::CacheInfo(cache_info)
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::{collections::HashMap, net::IpAddr};
 
 use futures_util::TryStreamExt;
 use rtnetlink::{
-    AddressMessageBuilder, Handle,
+    Handle,
     packet_route::{
         AddressFamily,
         address::{
@@ -17,6 +17,9 @@ use rtnetlink::{
         },
     },
 };
+
+#[cfg(test)]
+use rtnetlink::AddressMessageBuilder;
 
 use crate::{
     BaseInterface, ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6,
