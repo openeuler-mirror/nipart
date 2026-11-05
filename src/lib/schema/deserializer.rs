@@ -221,6 +221,46 @@ where
     deserializer.deserialize_any(IntegerOrString(PhantomData))
 }
 
+/// Parse an optional 64-bit value written as a hexadecimal string, with or
+/// without the `0x` prefix, or as a plain unsigned integer.
+pub(crate) fn option_u64_hex_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct HexOrInteger(PhantomData<fn() -> Option<u64>>);
+
+    impl Visitor<'_> for HexOrInteger {
+        type Value = Option<u64>;
+
+        fn expecting(
+            &self,
+            formatter: &mut std::fmt::Formatter,
+        ) -> std::fmt::Result {
+            formatter.write_str("hexadecimal string or unsigned integer")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Option<u64>, E>
+        where
+            E: de::Error,
+        {
+            u64::from_str_radix(value.trim_start_matches("0x"), 16)
+                .map_err(de::Error::custom)
+                .map(Some)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Option<u64>, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value))
+        }
+    }
+
+    deserializer.deserialize_any(HexOrInteger(PhantomData))
+}
+
 pub(crate) fn option_i32_or_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<i32>, D::Error>

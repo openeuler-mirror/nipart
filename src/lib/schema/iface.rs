@@ -15,10 +15,10 @@ use super::value::get_json_value_difference;
 use crate::{
     BaseInterface, BondInterface, DummyInterface, ErrorKind, EthernetInterface,
     InterfaceIdentifier, InterfaceState, InterfaceType, JsonDisplayHideSecrets,
-    LinuxBridgeInterface, LoopbackInterface, NipartError, NipartInterface,
-    OvsBridgeInterface, OvsInterface, UnknownInterface, VlanInterface,
-    VrfInterface, VxlanInterface, WifiCfgInterface, WifiPhyInterface,
-    WireguardInterface,
+    LinuxBridgeInterface, LoopbackInterface, MacSecInterface, NipartError,
+    NipartInterface, OvsBridgeInterface, OvsInterface, UnknownInterface,
+    VlanInterface, VrfInterface, VxlanInterface, WifiCfgInterface,
+    WifiPhyInterface, WireguardInterface,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonDisplayHideSecrets)]
@@ -50,6 +50,8 @@ pub enum Interface {
     Bond(Box<BondInterface>),
     /// Linux Bridge Interface
     LinuxBridge(Box<LinuxBridgeInterface>),
+    /// MACsec Interface
+    MacSec(Box<MacSecInterface>),
     /// Wireguard Interface
     Wireguard(Box<WireguardInterface>),
     /// Unknown interface.
@@ -173,6 +175,11 @@ impl<'de> Deserialize<'de> for Interface {
                 let inner = WireguardInterface::deserialize(v)
                     .map_err(serde::de::Error::custom)?;
                 Ok(Interface::Wireguard(Box::new(inner)))
+            }
+            Some(InterfaceType::MacSec) => {
+                let inner = MacSecInterface::deserialize(v)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(Interface::MacSec(Box::new(inner)))
             }
             _ => {
                 let inner = UnknownInterface::deserialize(v)
@@ -373,6 +380,7 @@ macro_rules! gen_iface_trait_impl {
                     Self::Bond,
                     Self::LinuxBridge,
                     Self::Wireguard,
+                    Self::MacSec,
                     Self::Unknown,
                 )
             }
@@ -400,6 +408,7 @@ macro_rules! gen_iface_trait_impl_mut {
                     Self::Bond,
                     Self::LinuxBridge,
                     Self::Wireguard,
+                    Self::MacSec,
                     Self::Unknown,
                 )
             }
@@ -449,6 +458,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         )
     }
@@ -470,6 +480,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         );
     }
@@ -492,6 +503,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         )
     }
@@ -514,6 +526,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         )
     }
@@ -540,6 +553,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         )
     }
@@ -561,6 +575,7 @@ impl NipartInterface for Interface {
             Interface::Bond,
             Interface::LinuxBridge,
             Interface::Wireguard,
+            Interface::MacSec,
             Interface::Unknown,
         )
     }
@@ -598,7 +613,7 @@ impl From<BaseInterface> for Interface {
             InterfaceType::Vxlan => Interface::Vxlan(Default::default()),
             InterfaceType::InfiniBand => todo!(),
             InterfaceType::Tun => todo!(),
-            InterfaceType::MacSec => todo!(),
+            InterfaceType::MacSec => Interface::MacSec(Default::default()),
             InterfaceType::Ipsec => todo!(),
             InterfaceType::Xfrm => todo!(),
             InterfaceType::IpVlan => todo!(),

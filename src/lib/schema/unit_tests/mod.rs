@@ -10,6 +10,7 @@ mod iface_type;
 mod inter_ifaces;
 mod ip;
 mod loopback;
+mod macsec;
 mod net_state;
 mod route;
 mod route_rule;

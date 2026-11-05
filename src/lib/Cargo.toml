@@ -16,6 +16,7 @@ futures-util = { workspace = true }
 log = { workspace = true }
 mozim = { workspace = true, features = ["netlink"] }
 nix = { workspace = true }
+nl-macsec = { workspace = true }
 nl-wireguard = { workspace = true }
 rand = { workspace = true }
 rtnetlink = { workspace = true }

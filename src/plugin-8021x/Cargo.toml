@@ -1,0 +1,20 @@
+[package]
+name = "nipart-plugin-8021x"
+version.workspace = true
+authors.workspace = true
+description = "IEEE 802.1X plugin of nipart"
+documentation.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+env_logger = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }
+shuli-wired = { workspace = true }
+nipart = { path = "../lib" }
+
+[[bin]]
+name = "nipart-plugin-8021x"
+path = "main.rs"

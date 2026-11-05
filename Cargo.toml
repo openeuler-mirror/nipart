@@ -6,6 +6,7 @@ members = [
     "src/lib",
     "src/derive",
     "src/plugin-demo",
+    "src/plugin-8021x",
     "src/plugin-wifi",
     "src/plugin-ovs",
 ]
@@ -17,7 +18,7 @@ description = "Linux Network Management Tool"
 documentation = "https://gitlab.freedesktop.org/NetworkManager/NetworkManager/"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.89"
+rust-version = "1.96"
 
 [workspace.dependencies]
 nipart = { version = "0.1.0", path = "src/lib" }
@@ -33,7 +34,9 @@ futures-channel = "0.3.11"
 rand = "0.10"
 clap = { version = "4.5", features = [ "cargo"] }
 wl-nl80211 = "0.8.0"
-shuli = { package = "shuli-wifi", git = "https://github.com/cathay4t/shuli.git" }
+nl-macsec = "0.2.1"
+shuli-wifi = { git = "https://github.com/cathay4t/shuli.git" }
+shuli-wired = { git = "https://github.com/cathay4t/shuli.git" }
 syn = { version = "3.0", default-features = false, features = [ "derive" ] }
 quote = "1.0"
 

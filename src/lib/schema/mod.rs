@@ -53,6 +53,7 @@ pub use self::{
         Interfaces, LinuxBridgeConfig, LinuxBridgeInterface,
         LinuxBridgeMulticastRouterType, LinuxBridgeOptions,
         LinuxBridgePortConfig, LinuxBridgeStpOptions, LoopbackInterface,
+        MacSecConfig, MacSecInterface, MacSecOffload, MacSecValidate,
         OvsBridgeConfig, OvsBridgeInterface, OvsBridgePortConfig, OvsInterface,
         UnknownInterface, VethConfig, VlanConfig, VlanInterface, VlanProtocol,
         VlanQosMapping, VlanRegistrationProtocol, VrfConfig, VrfInterface,

@@ -12,7 +12,7 @@ use nipart::{
     ErrorKind, Interface, InterfaceType, NipartError, NipartInterface,
     NipartWifiControl, WifiConfig,
 };
-use shuli::{
+use shuli_wifi::{
     KnownBss as ShuliKnownBss, NetworkConfig as ShuliNetworkConfig,
     NetworkConfigHints as ShuliNetworkConfigHints, WifiClient,
     WifiConfig as ShuliWifiConfig, WifiState,
@@ -78,12 +78,13 @@ pub(crate) fn latched_connect_error(
 /// where retrying is futile until the AP or the operator changes
 /// something: an unsupported security mode and rejected credentials
 /// (e.g. a wrong WIFI password).
-fn nipart_error_from_shuli(error: &shuli::WifiError) -> Option<NipartError> {
+fn nipart_error_from_shuli(
+    error: &shuli_wifi::WifiError,
+) -> Option<NipartError> {
     let kind = match error.kind {
-        shuli::ErrorKind::NoSupport => ErrorKind::NoSupport,
-        shuli::ErrorKind::WrongPassword | shuli::ErrorKind::AuthFailed => {
-            ErrorKind::AuthenticationError
-        }
+        shuli_wifi::ErrorKind::NoSupport => ErrorKind::NoSupport,
+        shuli_wifi::ErrorKind::WrongPassword
+        | shuli_wifi::ErrorKind::AuthFailed => ErrorKind::AuthenticationError,
         _ => return None,
     };
     Some(NipartError::new(kind, error.msg.clone()))

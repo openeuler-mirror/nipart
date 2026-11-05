@@ -12,8 +12,8 @@ use rtnetlink::{
 };
 
 use super::{
-    bond, bridge, get_iface_index, get_iface_index_opt, vlan, vrf, vxlan,
-    wireguard::apply_wireguard_config,
+    bond, bridge, get_iface_index, get_iface_index_opt, macsec, vlan, vrf,
+    vxlan, wireguard::apply_wireguard_config,
 };
 use crate::{
     BaseInterface, BondInterface, ErrorKind, Interface, InterfaceState,
@@ -89,6 +89,21 @@ pub(crate) async fn apply_iface_link_changes(
         && let Some(config) = wg_iface.wireguard.as_ref()
     {
         apply_wireguard_config(&wg_iface.base.name, config).await?;
+    }
+
+    if let Interface::MacSec(macsec_iface) = des_iface
+        && cur_iface.is_some()
+        && let Some(offload) = macsec_iface
+            .macsec
+            .as_ref()
+            .and_then(|config| config.offload)
+    {
+        macsec::apply_macsec_offload(
+            handle,
+            macsec_iface.base.name.as_str(),
+            offload,
+        )
+        .await?;
     }
 
     Ok(())
@@ -260,6 +275,15 @@ async fn prepare_link_messages(
                 cur_iface,
             )
             .await
+        }
+        Interface::MacSec(macsec_iface) => {
+            let builder = macsec::macsec_link_builder(
+                handle,
+                macsec_iface,
+                cur_iface.is_some(),
+            )
+            .await?;
+            apply_base_link_changes(handle, builder, des_iface, cur_iface).await
         }
         _ => {
             apply_base_link_changes(

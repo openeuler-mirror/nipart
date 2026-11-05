@@ -7,7 +7,7 @@ use nipart::{
     WifiScanResult, get_wifi_ifaces,
 };
 use rtnetlink::packet_core::Parseable;
-use shuli::BssInfo;
+use shuli_wifi::BssInfo;
 use wl_nl80211::{
     Ieee80211AkmSuite, Ieee80211CipherSuite, Ieee80211Element,
     Ieee80211Elements,
@@ -38,14 +38,15 @@ impl NipartWpaConn {
         let (scan_ifaces, _connected_ssids) = wifi_ifaces(iface_name).await?;
         let mut ret: HashMap<String, WifiScanResult> = HashMap::new();
         for iface_name in &scan_ifaces {
-            let scan_results = shuli::WifiClient::get_scan_result(iface_name)
-                .await
-                .map_err(|e| {
-                    NipartError::new(
-                        ErrorKind::PluginFailure,
-                        format!("scan dump failed on {iface_name}: {e}"),
-                    )
-                })?;
+            let scan_results =
+                shuli_wifi::WifiClient::get_scan_result(iface_name)
+                    .await
+                    .map_err(|e| {
+                        NipartError::new(
+                            ErrorKind::PluginFailure,
+                            format!("scan dump failed on {iface_name}: {e}"),
+                        )
+                    })?;
             merge_scan_results(&mut ret, iface_name, &scan_results, None);
         }
         Ok(sorted_scan_results(ret))
@@ -70,7 +71,7 @@ async fn _wifi_scan(
     let mut ret: HashMap<String, WifiScanResult> = HashMap::new();
     for iface_name in &scan_ifaces {
         let scan_results =
-            shuli::WifiClient::scan(iface_name, hidden_ssids.clone())
+            shuli_wifi::WifiClient::scan(iface_name, hidden_ssids.clone())
                 .await
                 .map_err(|e| {
                     NipartError::new(
